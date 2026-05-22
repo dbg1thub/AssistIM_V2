@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from client.core.file_text_extraction import extracted_file_context_text
+from client.core.image_summary import image_summary_context_text
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.ai_prompt_builder import privacy_scope_for_session
 from client.models.message import ChatMessage, MessageType, Session
@@ -250,6 +251,9 @@ class ConversationSummaryPromptBuilder:
         if message.message_type == MessageType.TEXT:
             return cls._normalize_scalar(message.content, max_chars=max_chars)
         if message.message_type == MessageType.IMAGE:
+            image_text = image_summary_context_text(message.extra, max_chars=max_chars)
+            if image_text:
+                return f"[图片摘要: {image_text}]"
             return "[图片]"
         if message.message_type == MessageType.FILE:
             name = cls._attachment_name(message)

@@ -44,6 +44,7 @@ from client.managers.ai_prompt_builder import (
     latest_peer_text_message_group,
 )
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER
 from client.models.ai_assistant import AIMessage, AIMessageRole
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
@@ -254,6 +255,34 @@ def test_reply_suggestion_prompt_includes_ready_file_text_extract_in_context() -
 
     prompt = built.request.messages[0]["content"]
     assert "对方: [文件内容: report.pdf: 合同金额为 100 元，付款期限为周五。]" in prompt
+    assert built.request.metadata["recent_context_count"] == 2
+
+
+def test_reply_suggestion_prompt_includes_ready_image_summary_in_context() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+    messages = [
+        ChatMessage(
+            "m-image",
+            "s1",
+            "peer",
+            "/uploads/whiteboard.png",
+            message_type=MessageType.IMAGE,
+            status=MessageStatus.RECEIVED,
+            extra={
+                IMAGE_SUMMARY_EXTRA_KEY: {
+                    "status": "ready",
+                    "text": "图片里是一张会议白板，写着周五前确认预算。",
+                },
+            },
+        ),
+        ChatMessage("m-text", "s1", "peer", "你看下这个图", status=MessageStatus.RECEIVED),
+    ]
+
+    built = builder.build_reply_suggestion_request(session, messages, current_user_id="me")
+
+    prompt = built.request.messages[0]["content"]
+    assert "对方: [图片摘要: 图片里是一张会议白板，写着周五前确认预算。]" in prompt
     assert built.request.metadata["recent_context_count"] == 2
 
 

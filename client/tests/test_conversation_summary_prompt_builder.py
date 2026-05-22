@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_summary_prompt_builder import (
     ConversationSummaryPromptBuilder,
@@ -137,16 +138,28 @@ def test_build_retrieval_summary_uses_fixed_field_order() -> None:
     ]
 
 
-def test_format_context_keeps_non_text_placeholders() -> None:
+def test_format_context_uses_ready_image_summary_and_keeps_non_ready_placeholder() -> None:
     session = Session(session_id="session-1", name="Bob", session_type="direct")
     builder = ConversationSummaryPromptBuilder()
     built = builder.build_bucket_summary_request(
         session,
         [
-            _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="看下这个图片", message_type=MessageType.IMAGE),
             _message(
-                "m-2",
-                datetime(2026, 4, 19, 10, 1, 0),
+                "m-1",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="看下这个图片",
+                message_type=MessageType.IMAGE,
+                extra={
+                    IMAGE_SUMMARY_EXTRA_KEY: {
+                        "status": "ready",
+                        "text": "图片里是一张会议白板，写着周五前确认预算。",
+                    },
+                },
+            ),
+            _message("m-2", datetime(2026, 4, 19, 10, 1, 0), content="/uploads/pending.png", message_type=MessageType.IMAGE),
+            _message(
+                "m-3",
+                datetime(2026, 4, 19, 10, 2, 0),
                 content="",
                 is_self=True,
                 message_type=MessageType.FILE,
@@ -158,6 +171,7 @@ def test_format_context_keeps_non_text_placeholders() -> None:
 
     assert built is not None
     prompt = built.request.messages[0]["content"]
+    assert "对方: [图片摘要: 图片里是一张会议白板，写着周五前确认预算。]" in prompt
     assert "对方: [图片]" in prompt
     assert "我: [文件: 合同.pdf]" in prompt
 
