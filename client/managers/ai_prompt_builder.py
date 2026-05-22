@@ -57,6 +57,7 @@ class ReplySummaryContext:
     weekly_history_summary: str = ""
     recent_bucket_summaries: tuple[str, ...] = field(default_factory=tuple)
     related_history_lines: tuple[str, ...] = field(default_factory=tuple)
+    media_summary_lines: tuple[str, ...] = field(default_factory=tuple)
 
 
 class AIPromptBuilder:
@@ -469,6 +470,11 @@ class AIPromptBuilder:
             for item in normalized_summary_context.related_history_lines
         ]
         related_history_lines = [item for item in related_history_lines if item]
+        media_summary_lines = [
+            _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
+            for item in normalized_summary_context.media_summary_lines
+        ]
+        media_summary_lines = [item for item in media_summary_lines if item]
         if history_lines:
             background_lines.extend(f"- 最近历史摘要：{item}" for item in history_lines)
         if background_lines:
@@ -480,6 +486,11 @@ class AIPromptBuilder:
             prompt_sections.append(
                 "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：\n"
                 + "\n".join(f"- {item}" for item in related_history_lines)
+            )
+        if media_summary_lines:
+            prompt_sections.append(
+                "最近媒体摘要（来自本地 sidecar 缓存，仅在和当前回复有关时参考）：\n"
+                + "\n".join(f"- {item}" for item in media_summary_lines)
             )
         privacy_scope = privacy_scope_for_session(session)
         must_be_local = session.uses_e2ee()
@@ -537,10 +548,12 @@ class AIPromptBuilder:
                 "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
                 "history_recall_count": len(related_history_lines),
+                "media_summary_count": len(media_summary_lines),
+                "has_media_summary_context": bool(media_summary_lines),
                 "has_rag_history_context": bool(related_history_lines),
                 "rag_history_count": len(related_history_lines),
                 "rag_history_prompt_chars": sum(len(item) for item in related_history_lines),
-                "has_summary": bool(background_lines or related_history_lines),
+                "has_summary": bool(background_lines or related_history_lines or media_summary_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
                 "reply_template_family": "gemma4_standard_roles",
@@ -610,6 +623,11 @@ class AIPromptBuilder:
             for item in normalized_summary_context.related_history_lines
         ]
         related_history_lines = [item for item in related_history_lines if item]
+        media_summary_lines = [
+            _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
+            for item in normalized_summary_context.media_summary_lines
+        ]
+        media_summary_lines = [item for item in media_summary_lines if item]
         if history_lines:
             background_lines.extend(f"- 最近历史摘要：{item}" for item in history_lines)
         if background_lines:
@@ -621,6 +639,11 @@ class AIPromptBuilder:
             prompt_sections.append(
                 "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：\n"
                 + "\n".join(f"- {item}" for item in related_history_lines)
+            )
+        if media_summary_lines:
+            prompt_sections.append(
+                "最近媒体摘要（来自本地 sidecar 缓存，仅在和当前回复有关时参考）：\n"
+                + "\n".join(f"- {item}" for item in media_summary_lines)
             )
 
         normalized_existing = [
@@ -686,10 +709,12 @@ class AIPromptBuilder:
                 "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
                 "history_recall_count": len(related_history_lines),
+                "media_summary_count": len(media_summary_lines),
+                "has_media_summary_context": bool(media_summary_lines),
                 "has_rag_history_context": bool(related_history_lines),
                 "rag_history_count": len(related_history_lines),
                 "rag_history_prompt_chars": sum(len(item) for item in related_history_lines),
-                "has_summary": bool(background_lines or related_history_lines),
+                "has_summary": bool(background_lines or related_history_lines or media_summary_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
             },

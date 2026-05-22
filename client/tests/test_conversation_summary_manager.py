@@ -124,6 +124,7 @@ class _FakeDatabase:
         self.memory_items: dict[tuple[str, str, str], dict] = {}
         self.memory_embeddings: dict[tuple[str, str, str], dict] = {}
         self.memory_ann_buckets: dict[tuple[str, str, str], dict] = {}
+        self.media_cache: dict[str, dict] = {}
         self.deleted_memory_sources: list[tuple[str, str, str]] = []
         self.app_state: dict[str, str] = {Database.AUTH_USER_ID_STATE_KEY: "test1"}
 
@@ -151,6 +152,45 @@ class _FakeDatabase:
     async def upsert_conversation_summary_bucket(self, payload: dict) -> None:
         key = (str(payload.get("session_id") or ""), int(payload.get("bucket_start_ts") or 0))
         self.buckets[key] = dict(payload)
+
+    async def upsert_conversation_summary_media_cache(self, payload: dict) -> None:
+        message_id = str(payload.get("message_id") or "")
+        existing = dict(self.media_cache.get(message_id) or {})
+        merged = {**existing, **dict(payload)}
+        if int(payload.get("bucket_start_ts") or 0) <= 0 and int(existing.get("bucket_start_ts") or 0) > 0:
+            merged["bucket_start_ts"] = int(existing["bucket_start_ts"])
+        if (
+            str(payload.get("summary_status") or "") == "pending"
+            and str(existing.get("summary_status") or "") == "ready"
+        ):
+            merged["summary_status"] = "ready"
+            merged["summary_text"] = existing.get("summary_text", "")
+            merged["detail"] = existing.get("detail", {})
+        self.media_cache[message_id] = merged
+
+    async def get_conversation_summary_media_cache(self, message_id: str) -> dict | None:
+        item = self.media_cache.get(str(message_id or ""))
+        return dict(item) if item is not None else None
+
+    async def list_conversation_summary_media_cache(
+        self,
+        session_id: str,
+        *,
+        bucket_start_ts: int | None = None,
+        ready_only: bool = False,
+        limit: int = 20,
+    ) -> list[dict]:
+        items = [
+            dict(item)
+            for item in self.media_cache.values()
+            if str(item.get("session_id") or "") == str(session_id or "")
+        ]
+        if bucket_start_ts is not None:
+            items = [item for item in items if int(item.get("bucket_start_ts") or 0) == int(bucket_start_ts or 0)]
+        if ready_only:
+            items = [item for item in items if str(item.get("summary_status") or "") == "ready"]
+        items.sort(key=lambda item: str(item.get("message_id") or ""))
+        return items[: max(1, int(limit or 20))]
 
     async def close_conversation_summary_bucket(self, session_id: str, bucket_start_ts: int, *, bucket_end_ts: float | None = None) -> None:
         key = (session_id, int(bucket_start_ts or 0))
@@ -541,9 +581,15 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
     fake_db = _FakeDatabase(session)
     fake_task_manager = _FakeTaskManager()
     event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-image": "D:/images/whiteboard.png"})
 
     async def scenario() -> None:
-        manager = _make_manager(fake_db, event_bus, fake_task_manager)
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+        )
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -795,6 +841,91 @@ def test_conversation_summary_manager_reuses_existing_voice_transcript_without_a
             assert fake_voice_runtime.calls == []
             assert fake_task_manager.requests
             assert "已有转写内容" in fake_task_manager.requests[0].messages[0]["content"]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_assigns_media_cache_to_open_bucket(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-image",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/whiteboard.png",
+                message_type=MessageType.IMAGE,
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            item = await fake_db.get_conversation_summary_media_cache("m-image")
+            assert item is not None
+            assert item["session_id"] == "session-1"
+            assert item["message_id"] == "m-image"
+            assert item["bucket_start_ts"] == int(incoming.timestamp.timestamp())
+            assert item["media_kind"] == "image"
+            assert item["summary_status"] in {"pending", "ready", "failed"}
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_uses_ready_media_cache_in_bucket_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-image": "D:/images/whiteboard.png"})
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-image",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/whiteboard.png",
+                message_type=MessageType.IMAGE,
+                extra={"name": "whiteboard.png"},
+            )
+            bucket_start_ts = int(incoming.timestamp.timestamp())
+            fake_db.media_cache["m-image"] = {
+                "session_id": "session-1",
+                "message_id": "m-image",
+                "bucket_start_ts": bucket_start_ts,
+                "media_kind": "image",
+                "summary_status": "ready",
+                "summary_text": "sidecar 图片摘要：白板写着周五前确认预算。",
+                "detail": {"status": "ready", "text": "sidecar 图片摘要：白板写着周五前确认预算。"},
+            }
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == []
+            assert fake_message_manager.update_image_summary_calls == []
+            assert fake_task_manager.requests
+            prompt = fake_task_manager.requests[0].messages[0]["content"]
+            assert "sidecar 图片摘要：白板写着周五前确认预算。" in prompt
         finally:
             await manager.close()
 

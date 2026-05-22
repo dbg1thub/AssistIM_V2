@@ -85,11 +85,13 @@ class FakeSummaryDatabase:
         open_bucket: dict | None = None,
         closed_buckets: list[dict] | None = None,
         historical_messages: list[ChatMessage] | None = None,
+        media_cache: list[dict] | None = None,
     ) -> None:
         self.is_connected = True
         self.open_bucket = dict(open_bucket or {}) if open_bucket is not None else None
         self.closed_buckets = [dict(item) for item in list(closed_buckets or [])]
         self.historical_messages = list(historical_messages or [])
+        self.media_cache = [dict(item) for item in list(media_cache or [])]
         self.get_messages_calls: list[dict] = []
 
     async def get_open_conversation_summary_bucket(self, session_id: str):
@@ -128,6 +130,25 @@ class FakeSummaryDatabase:
                 if message.timestamp is not None and message.timestamp.timestamp() < before_timestamp
             ]
         return messages[-limit:]
+
+    async def list_conversation_summary_media_cache(
+        self,
+        session_id: str,
+        *,
+        bucket_start_ts: int | None = None,
+        ready_only: bool = False,
+        limit: int = 20,
+    ):
+        items = [
+            dict(item)
+            for item in self.media_cache
+            if str(item.get("session_id") or "") == str(session_id or "")
+        ]
+        if bucket_start_ts is not None:
+            items = [item for item in items if int(item.get("bucket_start_ts") or 0) == int(bucket_start_ts or 0)]
+        if ready_only:
+            items = [item for item in items if str(item.get("summary_status") or "") == "ready"]
+        return items[: max(1, int(limit or 20))]
 
 
 class FakeReplyMemoryManager:
@@ -480,6 +501,58 @@ def test_suggest_replies_includes_related_summary_rag_context() -> None:
         assert "周日去那家店吗？" in memory.calls[0]["query_text"]
         assert memory.calls[0]["max_end_ts"] is not None
         assert db.get_messages_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_includes_recent_ready_media_cache_context() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="我看到了，预算需要周五前确认。\n可以，我按这个信息继续推进。\n这会儿我不太方便确认。\n我晚点再看这张图。"
+        )
+        db = FakeSummaryDatabase(
+            media_cache=[
+                {
+                    "session_id": "s1",
+                    "message_id": "m-image",
+                    "bucket_start_ts": 100,
+                    "media_kind": "image",
+                    "summary_status": "ready",
+                    "summary_text": "sidecar 图片摘要：白板写着周五前确认预算。",
+                },
+                {
+                    "session_id": "s1",
+                    "message_id": "m-voice",
+                    "bucket_start_ts": 100,
+                    "media_kind": "audio",
+                    "summary_status": "pending",
+                    "summary_text": "不应进入 prompt。",
+                },
+            ],
+        )
+        manager = AIAssistManager(task_manager=fake, db=db)
+        messages = [
+            ChatMessage(
+                "m-image",
+                "s1",
+                "peer",
+                "/uploads/whiteboard.png",
+                message_type=MessageType.IMAGE,
+                status=MessageStatus.RECEIVED,
+                extra={IMAGE_SUMMARY_EXTRA_KEY: {"status": "ready", "text": "extra 图片摘要。"}},
+            ),
+            _peer_message("m-text", "你看下这个图"),
+        ]
+
+        state = await manager.suggest_replies(_session(), messages, current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "最近媒体摘要（来自本地 sidecar 缓存，仅在和当前回复有关时参考）：" in prompt
+        assert "图片：sidecar 图片摘要：白板写着周五前确认预算。" in prompt
+        assert "不应进入 prompt。" not in prompt
+        assert fake.requests[0].metadata["media_summary_count"] == 1
+        assert fake.requests[0].metadata["has_media_summary_context"] is True
 
     asyncio.run(scenario())
 

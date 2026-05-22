@@ -286,6 +286,29 @@ def test_reply_suggestion_prompt_includes_ready_image_summary_in_context() -> No
     assert built.request.metadata["recent_context_count"] == 2
 
 
+def test_reply_suggestion_prompt_includes_media_summary_lines() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+    messages = [
+        ChatMessage("m-text", "s1", "peer", "你看下这个图", status=MessageStatus.RECEIVED),
+    ]
+
+    built = builder.build_reply_suggestion_request(
+        session,
+        messages,
+        current_user_id="me",
+        summary_context=ReplySummaryContext(
+            media_summary_lines=("图片：sidecar 图片摘要：白板写着周五前确认预算。",),
+        ),
+    )
+
+    prompt = built.request.messages[0]["content"]
+    assert "最近媒体摘要（来自本地 sidecar 缓存，仅在和当前回复有关时参考）：" in prompt
+    assert "图片：sidecar 图片摘要：白板写着周五前确认预算。" in prompt
+    assert built.request.metadata["media_summary_count"] == 1
+    assert built.request.metadata["has_media_summary_context"] is True
+
+
 def test_file_summary_request_is_local_and_bounded() -> None:
     builder = AIPromptBuilder()
     session = Session(session_id="s1", name="Alice", session_type="direct")

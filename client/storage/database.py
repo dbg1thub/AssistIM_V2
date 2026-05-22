@@ -1579,16 +1579,60 @@ class Database:
                 ON CONFLICT(message_id)
                 DO UPDATE SET
                     session_id = excluded.session_id,
-                    bucket_start_ts = excluded.bucket_start_ts,
+                    bucket_start_ts = CASE
+                        WHEN excluded.bucket_start_ts > 0 THEN excluded.bucket_start_ts
+                        ELSE conversation_summary_media_cache.bucket_start_ts
+                    END,
                     media_kind = excluded.media_kind,
                     source_fingerprint = excluded.source_fingerprint,
-                    summary_status = excluded.summary_status,
-                    summary_text_ciphertext = excluded.summary_text_ciphertext,
-                    detail_json_ciphertext = excluded.detail_json_ciphertext,
-                    model_name = excluded.model_name,
-                    runtime_kind = excluded.runtime_kind,
-                    attempt_count = excluded.attempt_count,
-                    error_code = excluded.error_code,
+                    summary_status = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                        THEN conversation_summary_media_cache.summary_status
+                        ELSE excluded.summary_status
+                    END,
+                    summary_text_ciphertext = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.summary_text_ciphertext = ''
+                        THEN conversation_summary_media_cache.summary_text_ciphertext
+                        ELSE excluded.summary_text_ciphertext
+                    END,
+                    detail_json_ciphertext = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.detail_json_ciphertext = ''
+                        THEN conversation_summary_media_cache.detail_json_ciphertext
+                        ELSE excluded.detail_json_ciphertext
+                    END,
+                    model_name = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.model_name = ''
+                        THEN conversation_summary_media_cache.model_name
+                        ELSE excluded.model_name
+                    END,
+                    runtime_kind = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.runtime_kind = ''
+                        THEN conversation_summary_media_cache.runtime_kind
+                        ELSE excluded.runtime_kind
+                    END,
+                    attempt_count = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.attempt_count = 0
+                        THEN conversation_summary_media_cache.attempt_count
+                        ELSE excluded.attempt_count
+                    END,
+                    error_code = CASE
+                        WHEN excluded.summary_status = 'pending'
+                         AND conversation_summary_media_cache.summary_status = 'ready'
+                         AND excluded.error_code = ''
+                        THEN conversation_summary_media_cache.error_code
+                        ELSE excluded.error_code
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (

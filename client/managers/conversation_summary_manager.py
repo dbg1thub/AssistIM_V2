@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Optional
 
@@ -12,8 +13,10 @@ from client.core.async_utils import bounded_cancel_gather
 from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTextExtractionError
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.events.event_bus import EventBus, get_event_bus
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_ann_index import ConversationAnnIndex
@@ -106,6 +109,8 @@ class ConversationSummaryManager:
         await self._subscribe(MessageEvent.EDITED, self._on_message_event)
         await self._subscribe(MessageEvent.RECALLED, self._on_message_event)
         await self._subscribe(MessageEvent.DELETED, self._on_message_event)
+        await self._subscribe(MessageEvent.VOICE_TRANSCRIPT_UPDATED, self._on_message_event)
+        await self._subscribe(MessageEvent.IMAGE_SUMMARY_UPDATED, self._on_message_event)
         await self._subscribe(MessageEvent.HISTORY_CLEARING, self._on_session_history_clearing)
         await self._subscribe(MessageEvent.HISTORY_CLEARED, self._on_session_history_cleared)
         await self._subscribe(SessionEvent.DELETED, self._on_session_deleted)
@@ -222,6 +227,7 @@ class ConversationSummaryManager:
             await self._db.upsert_conversation_summary_bucket(
                 self._new_bucket_payload(session_id, message, message_ts, is_open=True)
             )
+            await self._ensure_media_cache_bucket(session_id, message, message_ts)
             self._schedule_refresh(session_id, message_ts, delay=self.DEBOUNCE_SECONDS)
             return
 
@@ -245,6 +251,7 @@ class ConversationSummaryManager:
             await self._db.upsert_conversation_summary_bucket(
                 self._new_bucket_payload(session_id, message, message_ts, is_open=True)
             )
+            await self._ensure_media_cache_bucket(session_id, message, message_ts)
             self._schedule_refresh(session_id, message_ts, delay=self.DEBOUNCE_SECONDS)
             return
 
@@ -256,6 +263,7 @@ class ConversationSummaryManager:
         updated["summary_status"] = "stale"
         updated["updated_at"] = int(time.time())
         await self._db.upsert_conversation_summary_bucket(updated)
+        await self._ensure_media_cache_bucket(session_id, message, bucket_start_ts)
         await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
         self._schedule_refresh(session_id, bucket_start_ts, delay=self.DEBOUNCE_SECONDS)
 
@@ -339,6 +347,11 @@ class ConversationSummaryManager:
             bucket_start_ts,
             bucket_end_ts,
             limit=self._prompt_builder.MAX_BUCKET_MESSAGES,
+        )
+        messages = await self._apply_ready_media_cache_to_messages(
+            session_id,
+            bucket_start_ts,
+            messages,
         )
         messages = await self._prepare_voice_transcripts_for_summary(messages)
         messages = await self._prepare_file_text_extracts_for_summary(messages)
@@ -653,6 +666,110 @@ class ConversationSummaryManager:
                 "summary_status": "ready",
             },
         )
+
+    async def _ensure_media_cache_bucket(
+        self,
+        session_id: str,
+        message: ChatMessage,
+        bucket_start_ts: int,
+    ) -> None:
+        if message.message_type not in {MessageType.IMAGE, MessageType.VOICE}:
+            return
+        upsert_media_cache = getattr(self._db, "upsert_conversation_summary_media_cache", None)
+        if not callable(upsert_media_cache):
+            return
+        media_kind = "audio" if message.message_type == MessageType.VOICE else "image"
+        try:
+            await upsert_media_cache(
+                {
+                    "session_id": str(session_id or "").strip(),
+                    "message_id": str(message.message_id or "").strip(),
+                    "bucket_start_ts": int(bucket_start_ts or 0),
+                    "media_kind": media_kind,
+                    "summary_status": "pending",
+                    "updated_at": int(time.time()),
+                }
+            )
+        except Exception:
+            logger.exception(
+                "Failed to assign media summary cache to bucket session_id=%s message_id=%s bucket_start_ts=%s",
+                session_id,
+                message.message_id,
+                bucket_start_ts,
+            )
+
+    async def _apply_ready_media_cache_to_messages(
+        self,
+        session_id: str,
+        bucket_start_ts: int,
+        messages: list[ChatMessage],
+    ) -> list[ChatMessage]:
+        list_media_cache = getattr(self._db, "list_conversation_summary_media_cache", None)
+        if not callable(list_media_cache) or not messages:
+            return messages
+        try:
+            cached_items = await list_media_cache(
+                session_id,
+                bucket_start_ts=int(bucket_start_ts or 0),
+                ready_only=True,
+                limit=max(len(messages), self._prompt_builder.MAX_BUCKET_MESSAGES),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load media summary cache for bucket session_id=%s bucket_start_ts=%s",
+                session_id,
+                bucket_start_ts,
+            )
+            return messages
+
+        items_by_message_id = {
+            str(item.get("message_id") or "").strip(): dict(item)
+            for item in list(cached_items or [])
+            if str(item.get("message_id") or "").strip()
+        }
+        if not items_by_message_id:
+            return messages
+
+        prepared: list[ChatMessage] = []
+        for message in messages:
+            item = items_by_message_id.get(str(message.message_id or "").strip())
+            if item is None:
+                prepared.append(message)
+                continue
+            prepared.append(self._message_with_media_cache(message, item))
+        return prepared
+
+    @staticmethod
+    def _message_with_media_cache(message: ChatMessage, item: dict[str, Any]) -> ChatMessage:
+        if str(item.get("summary_status") or "").strip() != "ready":
+            return message
+        summary_text = str(item.get("summary_text") or "").strip()
+        if not summary_text:
+            return message
+        extra = dict(message.extra or {})
+        if message.message_type == MessageType.IMAGE:
+            existing = dict(extra.get(IMAGE_SUMMARY_EXTRA_KEY) or {})
+            if str(existing.get("status") or "").strip() == "ready":
+                return message
+            detail = dict(item.get("detail") or {})
+            extra[IMAGE_SUMMARY_EXTRA_KEY] = {
+                **detail,
+                "status": "ready",
+                "text": summary_text,
+            }
+            return replace(message, extra=extra)
+        if message.message_type == MessageType.VOICE:
+            existing = dict(extra.get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+            if str(existing.get("status") or "").strip() == "ready":
+                return message
+            detail = dict(item.get("detail") or {})
+            extra[VOICE_TRANSCRIPT_EXTRA_KEY] = {
+                **detail,
+                "status": "ready",
+                "text": summary_text,
+            }
+            return replace(message, extra=extra)
+        return message
 
     def _cancel_session_tasks(self, session_id: str) -> None:
         normalized_session_id = str(session_id or "").strip()

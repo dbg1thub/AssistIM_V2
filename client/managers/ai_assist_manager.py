@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from client.core.datetime_utils import to_epoch_seconds
 from client.managers.ai_prompt_builder import (
@@ -124,6 +124,7 @@ class AIAssistManager:
     REPLY_HISTORY_RECALL_LIMIT = 3
     REPLY_HISTORY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
     REPLY_HISTORY_RECALL_MAX_CHARS = 700
+    REPLY_MEDIA_SUMMARY_LIMIT = 4
 
     def __init__(
         self,
@@ -624,12 +625,17 @@ class AIAssistManager:
             messages,
             current_user_id=current_user_id,
         )
+        media_summary_lines = await self._load_recent_media_summary_lines(
+            normalized_session_id,
+            messages,
+        )
 
         return ReplySummaryContext(
             open_bucket_summary=open_bucket_summary,
             weekly_history_summary=weekly_history_summary,
             recent_bucket_summaries=tuple(history_summaries[:summary_limit]),
             related_history_lines=tuple(related_history_lines),
+            media_summary_lines=tuple(media_summary_lines),
         )
 
     def _compose_weekly_history_summary(self, summaries: Sequence[str]) -> str:
@@ -708,6 +714,70 @@ class AIAssistManager:
             logger.exception("Failed to load reply-suggestion RAG context session_id=%s", normalized_session_id)
             return []
         return self._clip_related_summary_lines(context.lines)
+
+    async def _load_recent_media_summary_lines(
+        self,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+    ) -> list[str]:
+        """Return ready media sidecar summaries for messages in the recent reply window."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or not messages:
+            return []
+        list_media_cache = getattr(self._db, "list_conversation_summary_media_cache", None)
+        if not callable(list_media_cache):
+            return []
+
+        context_limit = max(1, int(self._prompt_builder.MAX_CONTEXT_MESSAGES or 1))
+        recent_messages = list(messages[-context_limit:])
+        recent_message_ids = [
+            str(message.message_id or "").strip()
+            for message in recent_messages
+            if message.message_type in {MessageType.IMAGE, MessageType.VOICE}
+            and str(message.message_id or "").strip()
+        ]
+        if not recent_message_ids:
+            return []
+        recent_id_set = set(recent_message_ids)
+
+        try:
+            cached_items = await list_media_cache(
+                normalized_session_id,
+                ready_only=True,
+                limit=max(self.REPLY_MEDIA_SUMMARY_LIMIT * 3, len(recent_message_ids)),
+            )
+        except Exception:
+            logger.exception("Failed to load reply-suggestion media cache session_id=%s", normalized_session_id)
+            return []
+
+        items_by_message_id = {
+            str(item.get("message_id") or "").strip(): dict(item)
+            for item in list(cached_items or [])
+            if str(item.get("message_id") or "").strip() in recent_id_set
+        }
+        lines: list[str] = []
+        seen: set[str] = set()
+        for message_id in recent_message_ids:
+            line = self._format_media_summary_cache_line(items_by_message_id.get(message_id))
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+            if len(lines) >= self.REPLY_MEDIA_SUMMARY_LIMIT:
+                break
+        return lines
+
+    def _format_media_summary_cache_line(self, item: dict[str, Any] | None) -> str:
+        if not item:
+            return ""
+        if str(item.get("summary_status") or "").strip() != "ready":
+            return ""
+        summary_text = _clip_text(str(item.get("summary_text") or ""), self.REPLY_HISTORY_RECALL_MAX_CHARS)
+        if not summary_text:
+            return ""
+        media_kind = str(item.get("media_kind") or "").strip().lower()
+        label = "语音" if media_kind == "audio" else "图片" if media_kind == "image" else "媒体"
+        return _clip_text(f"{label}：{summary_text}", self.REPLY_HISTORY_RECALL_MAX_CHARS)
 
     def _reply_rag_query_text(
         self,

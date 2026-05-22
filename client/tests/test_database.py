@@ -2778,6 +2778,75 @@ def test_database_upserts_encrypted_conversation_summary_media_cache() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_media_cache_preserves_bucket_when_ready_update_has_no_bucket() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-summary-media-cache-bucket.db"
+    now = int(time.time())
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                await database.upsert_conversation_summary_media_cache(
+                    {
+                        "session_id": "session-1",
+                        "message_id": "m-image",
+                        "bucket_start_ts": now,
+                        "media_kind": "image",
+                        "summary_status": "pending",
+                        "updated_at": now,
+                    }
+                )
+                await database.upsert_conversation_summary_media_cache(
+                    {
+                        "session_id": "session-1",
+                        "message_id": "m-image",
+                        "bucket_start_ts": 0,
+                        "media_kind": "image",
+                        "summary_status": "ready",
+                        "summary_text": "图片里是一张会议白板。",
+                        "detail": {"status": "ready", "text": "图片里是一张会议白板。"},
+                        "updated_at": now + 1,
+                    }
+                )
+
+                ready_item = await database.get_conversation_summary_media_cache("m-image")
+                assert ready_item is not None
+                assert ready_item["bucket_start_ts"] == now
+                assert ready_item["summary_status"] == "ready"
+                assert ready_item["summary_text"] == "图片里是一张会议白板。"
+
+                await database.upsert_conversation_summary_media_cache(
+                    {
+                        "session_id": "session-1",
+                        "message_id": "m-image",
+                        "bucket_start_ts": now,
+                        "media_kind": "image",
+                        "summary_status": "pending",
+                        "updated_at": now + 2,
+                    }
+                )
+
+                preserved_item = await database.get_conversation_summary_media_cache("m-image")
+                assert preserved_item is not None
+                assert preserved_item["bucket_start_ts"] == now
+                assert preserved_item["summary_status"] == "ready"
+                assert preserved_item["summary_text"] == "图片里是一张会议白板。"
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_lists_summary_buckets_for_rebuild() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
