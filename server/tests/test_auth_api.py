@@ -147,7 +147,13 @@ def test_register_rejects_duplicate_verified_email(client: TestClient) -> None:
     assert send_response.json()["code"] == ErrorCode.USER_EXISTS
 
 
-def test_password_reset_uses_email_code_and_invalidates_existing_sessions(client: TestClient, auth_header) -> None:
+def test_password_reset_uses_email_code_and_invalidates_existing_sessions(
+    client: TestClient,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import auth as auth_routes
+
     auth_payload = register_user(
         client,
         "reset-owner",
@@ -178,6 +184,9 @@ def test_password_reset_uses_email_code_and_invalidates_existing_sessions(client
     assert wrong_code_response.status_code == 400
     assert wrong_code_response.json()["code"] == ErrorCode.INVALID_REQUEST
 
+    disconnect = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth_routes.connection_manager, "disconnect_user_connections", disconnect)
+
     reset_response = client.post(
         "/api/v1/auth/password-reset/confirm",
         json={
@@ -188,6 +197,12 @@ def test_password_reset_uses_email_code_and_invalidates_existing_sessions(client
     )
     assert reset_response.status_code == 200
     assert reset_response.json()["data"] == {"reset": True}
+    disconnect.assert_awaited_once()
+    assert disconnect.await_args.args == (auth_payload["user"]["id"],)
+    assert disconnect.await_args.kwargs["reason"] == "password_reset"
+    payload = disconnect.await_args.kwargs["payload"]
+    assert payload["type"] == "force_logout"
+    assert payload["data"] == {"reason": "password_reset"}
 
     old_password_login = client.post(
         "/api/v1/auth/login",

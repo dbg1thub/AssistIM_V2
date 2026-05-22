@@ -59,6 +59,13 @@ EXIT_CODE_OK = 0
 EXIT_CODE_SINGLE_INSTANCE = 1
 EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED = 2
 EXIT_CODE_STARTUP_RUNTIME_FAILED = 3
+FORMAL_FORCE_LOGOUT_REASONS = {
+    "session_replaced",
+    "logout",
+    "password_reset",
+    "admin_disable_user",
+    "admin_force_logout",
+}
 
 
 def _peek_discovery_controller():
@@ -1057,7 +1064,7 @@ class Application:
             return
 
         reason = str((message.get("data") or {}).get("reason", "") or "")
-        if reason not in {"session_replaced", "logout"}:
+        if reason not in FORMAL_FORCE_LOGOUT_REASONS:
             return
         if self._forced_logout_in_progress or self._logout_task is not None:
             return

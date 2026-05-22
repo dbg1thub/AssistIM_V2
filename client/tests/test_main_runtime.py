@@ -2275,7 +2275,17 @@ def test_application_ws_auth_error_triggers_auth_loss() -> None:
     asyncio.run(scenario())
 
 
-def test_application_force_logout_logout_reason_uses_auth_loss_flow() -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "session_replaced",
+        "logout",
+        "password_reset",
+        "admin_disable_user",
+        "admin_force_logout",
+    ],
+)
+def test_application_force_logout_formal_reasons_use_auth_loss_flow(reason: str) -> None:
     main_module = _load_main_module()
     reasons: list[str] = []
 
@@ -2291,15 +2301,44 @@ def test_application_force_logout_logout_reason_uses_auth_loss_flow() -> None:
             {
                 "type": "force_logout",
                 "data": {
-                    "reason": "logout",
+                    "reason": reason,
                 },
             }
         )
 
-        assert reasons == ["force_logout:logout"]
+        assert reasons == [f"force_logout:{reason}"]
         assert app._forced_logout_in_progress is False
 
     asyncio.run(scenario())
+
+
+def test_application_force_logout_unknown_reason_does_not_trigger_auth_loss() -> None:
+    main_module = _load_main_module()
+    reasons: list[str] = []
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        async def fake_handle_auth_lost(reason: str) -> None:
+            reasons.append(reason)
+
+        app._handle_auth_lost = fake_handle_auth_lost  # type: ignore[method-assign]
+
+        await app._handle_transport_message(
+            {
+                "type": "force_logout",
+                "data": {
+                    "reason": "unknown_force_logout_reason",
+                },
+            }
+        )
+
+        assert reasons == []
+        assert app._forced_logout_in_progress is False
+
+    asyncio.run(scenario())
+
+
 def test_application_ws_business_forbidden_error_does_not_trigger_auth_loss() -> None:
     main_module = _load_main_module()
     reasons: list[str] = []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
@@ -148,6 +149,30 @@ def test_admin_disable_user_blocks_login_existing_token_and_records_audit(client
     assert "secret123" not in audit.detail_json
 
 
+def test_admin_disable_user_sends_formal_force_logout_reason(client: TestClient, monkeypatch) -> None:
+    from app.api.v1 import admin as admin_routes
+
+    admin_auth = _register(client, "admin-disable-reason-admin", "Admin User")
+    target_auth = _register(client, "admin-disable-reason-target", "Target User")
+    _set_role(admin_auth["user"]["id"], "admin")
+    disconnect = AsyncMock(return_value=True)
+    monkeypatch.setattr(admin_routes.connection_manager, "disconnect_user_connections", disconnect)
+
+    response = client.post(
+        f"/api/v1/admin/users/{target_auth['user']['id']}/disable",
+        json={"reason": "risk review"},
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 200, response.text
+    disconnect.assert_awaited_once()
+    assert disconnect.await_args.args == (target_auth["user"]["id"],)
+    assert disconnect.await_args.kwargs["reason"] == "admin_disable_user"
+    payload = disconnect.await_args.kwargs["payload"]
+    assert payload["type"] == "force_logout"
+    assert payload["data"] == {"reason": "admin_disable_user"}
+
+
 def test_admin_enable_user_allows_login_and_records_audit(client: TestClient) -> None:
     admin_auth = _register(client, "admin-users-enable-admin", "Admin User")
     target_auth = _register(client, "admin-users-enable-target", "Target User")
@@ -202,6 +227,29 @@ def test_admin_force_logout_invalidates_existing_token_disconnects_and_records_a
     assert audit.actor_user_id == admin_auth["user"]["id"]
     assert audit.target_id == target_auth["user"]["id"]
     assert audit.success is True
+
+
+def test_admin_force_logout_sends_formal_force_logout_reason(client: TestClient, monkeypatch) -> None:
+    from app.api.v1 import admin as admin_routes
+
+    admin_auth = _register(client, "admin-users-logout-reason-admin", "Admin User")
+    target_auth = _register(client, "admin-users-logout-reason-target", "Target User")
+    _set_role(admin_auth["user"]["id"], "admin")
+    disconnect = AsyncMock(return_value=True)
+    monkeypatch.setattr(admin_routes.connection_manager, "disconnect_user_connections", disconnect)
+
+    response = client.post(
+        f"/api/v1/admin/users/{target_auth['user']['id']}/force-logout",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 200, response.text
+    disconnect.assert_awaited_once()
+    assert disconnect.await_args.args == (target_auth["user"]["id"],)
+    assert disconnect.await_args.kwargs["reason"] == "admin_force_logout"
+    payload = disconnect.await_args.kwargs["payload"]
+    assert payload["type"] == "force_logout"
+    assert payload["data"] == {"reason": "admin_force_logout"}
 
 
 def test_admin_set_user_role_by_id_records_audit_and_protects_self_demote(client: TestClient) -> None:
