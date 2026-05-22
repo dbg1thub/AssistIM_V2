@@ -157,7 +157,24 @@ class _FakePrivateSessionRepo:
         return list(self.member_ids)
 
 
-def test_call_service_requires_accept_before_signaling_and_validates_payload() -> None:
+class _FakeBlocks:
+    def has_block_relation(self, user_id: str, other_user_id: str) -> bool:
+        return False
+
+
+def _allow_visible_private_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.session_service import SessionService
+
+    original_init = SessionService.__init__
+
+    def fake_init(self, db):
+        original_init(self, db)
+        self.blocks = _FakeBlocks()
+
+    monkeypatch.setattr(SessionService, "__init__", fake_init)
+
+
+def test_call_service_requires_accept_before_signaling_and_validates_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.errors import AppError
     from app.realtime.call_registry import InMemoryCallRegistry
     from app.services.call_service import CallService
@@ -165,6 +182,7 @@ def test_call_service_requires_accept_before_signaling_and_validates_payload() -
     registry = InMemoryCallRegistry()
     service = CallService(db=None, registry=registry)
     service.sessions = _FakePrivateSessionRepo()
+    _allow_visible_private_sessions(monkeypatch)
 
     event_type, target_user_ids, invite = service.invite(
         session_id="session-1",
@@ -201,7 +219,7 @@ def test_call_service_requires_accept_before_signaling_and_validates_payload() -
     assert "to_user_id" not in offer
 
 
-def test_call_service_rejects_duplicate_accept_and_post_accept_reject() -> None:
+def test_call_service_rejects_duplicate_accept_and_post_accept_reject(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.errors import AppError
     from app.realtime.call_registry import InMemoryCallRegistry
     from app.services.call_service import CallService
@@ -209,6 +227,7 @@ def test_call_service_rejects_duplicate_accept_and_post_accept_reject() -> None:
     registry = InMemoryCallRegistry()
     service = CallService(db=None, registry=registry)
     service.sessions = _FakePrivateSessionRepo()
+    _allow_visible_private_sessions(monkeypatch)
 
     service.invite(
         session_id="session-1",
@@ -227,7 +246,7 @@ def test_call_service_rejects_duplicate_accept_and_post_accept_reject() -> None:
     assert reject_exc.value.status_code == 409
 
 
-def test_call_service_rejects_reused_call_id_before_registry_overwrite() -> None:
+def test_call_service_rejects_reused_call_id_before_registry_overwrite(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.errors import AppError
     from app.realtime.call_registry import InMemoryCallRegistry
     from app.services.call_service import CallService
@@ -242,6 +261,7 @@ def test_call_service_rejects_reused_call_id_before_registry_overwrite() -> None
     )
     service = CallService(db=None, registry=registry)
     service.sessions = _FakePrivateSessionRepo()
+    _allow_visible_private_sessions(monkeypatch)
 
     with pytest.raises(AppError) as exc_info:
         service.invite(

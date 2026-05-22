@@ -241,10 +241,12 @@ class CallService:
             raise AppError(ErrorCode.INVALID_REQUEST, "calls only support private non-AI sessions", 422)
         member_ids = self.sessions.list_member_ids(normalized_session_id)
         distinct_member_ids = list(dict.fromkeys(str(member_id or '').strip() for member_id in member_ids if str(member_id or '').strip()))
-        if not SessionService._is_visible_private_session(session, distinct_member_ids):
+        if len(distinct_member_ids) < 2:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         if len(distinct_member_ids) != 2:
             raise AppError(ErrorCode.SESSION_CONFLICT, "private call requires exactly two session members", 409)
+        if not SessionService(self.db)._is_visible_private_session(session, distinct_member_ids, user_id):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return session, distinct_member_ids
 
     def _require_participant_call(self, call_id: str, user_id: str) -> ActiveCall:
