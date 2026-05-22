@@ -2679,6 +2679,105 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_upserts_encrypted_conversation_summary_media_cache() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-summary-media-cache.db"
+    now = int(time.time())
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                await database.upsert_conversation_summary_media_cache(
+                    {
+                        "session_id": "session-1",
+                        "message_id": "m-image",
+                        "bucket_start_ts": now,
+                        "media_kind": "image",
+                        "source_fingerprint": "sha256:image",
+                        "summary_status": "ready",
+                        "summary_text": "图片里是一张会议白板。",
+                        "detail": {"engine": "local_vision", "text": "图片里是一张会议白板。"},
+                        "model_name": "local_vision",
+                        "runtime_kind": "multimodal_sidecar",
+                        "attempt_count": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+                item = await database.get_conversation_summary_media_cache("m-image")
+                assert item is not None
+                assert item["session_id"] == "session-1"
+                assert item["message_id"] == "m-image"
+                assert item["media_kind"] == "image"
+                assert item["summary_status"] == "ready"
+                assert item["summary_text"] == "图片里是一张会议白板。"
+                assert item["detail"]["engine"] == "local_vision"
+
+                ready_items = await database.list_conversation_summary_media_cache(
+                    "session-1",
+                    bucket_start_ts=now,
+                    ready_only=True,
+                )
+                assert [entry["message_id"] for entry in ready_items] == ["m-image"]
+
+                raw = await (
+                    await database._db.execute(
+                        """
+                        SELECT summary_text_ciphertext, detail_json_ciphertext
+                        FROM conversation_summary_media_cache
+                        WHERE message_id = ?
+                        """,
+                        ("m-image",),
+                    )
+                ).fetchone()
+                assert raw["summary_text_ciphertext"] != "图片里是一张会议白板。"
+                assert "local_vision" not in raw["detail_json_ciphertext"]
+
+                await database.upsert_conversation_summary_media_cache(
+                    {
+                        "session_id": "session-1",
+                        "message_id": "m-image",
+                        "bucket_start_ts": now,
+                        "media_kind": "image",
+                        "summary_status": "failed",
+                        "summary_text": "",
+                        "detail": {"status": "failed", "reason": "vision_unavailable"},
+                        "model_name": "local_vision",
+                        "runtime_kind": "multimodal_sidecar",
+                        "attempt_count": 2,
+                        "error_code": "AI_VISION_RUNTIME_UNAVAILABLE",
+                        "updated_at": now + 1,
+                    }
+                )
+
+                failed_item = await database.get_conversation_summary_media_cache("m-image")
+                assert failed_item is not None
+                assert failed_item["summary_status"] == "failed"
+                assert failed_item["summary_text"] == ""
+                assert failed_item["detail"]["reason"] == "vision_unavailable"
+                assert failed_item["attempt_count"] == 2
+                assert await database.list_conversation_summary_media_cache(
+                    "session-1",
+                    bucket_start_ts=now,
+                    ready_only=True,
+                ) == []
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_lists_summary_buckets_for_rebuild() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

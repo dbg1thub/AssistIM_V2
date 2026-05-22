@@ -356,9 +356,13 @@ class FakeDatabase:
         self.sessions: dict[str, Session] = {}
         self.saved_batches: list[list[ChatMessage]] = []
         self.profile_update_calls: list[tuple[str, str, dict]] = []
+        self.media_cache_upserts: list[dict] = []
 
     async def save_message(self, message: ChatMessage) -> None:
         self.messages[message.message_id] = message
+
+    async def upsert_conversation_summary_media_cache(self, payload: dict) -> None:
+        self.media_cache_upserts.append(dict(payload))
 
     async def get_message(self, message_id: str) -> ChatMessage | None:
         return self.messages.get(message_id)
@@ -718,6 +722,24 @@ def test_message_manager_update_image_summary_persists_local_extra_and_emits(mon
             assert fake_event_bus.events[-1][1]['message_id'] == 'm-image'
             assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
             assert fake_ai_memory_indexing_service.synced_image_messages == [updated]
+            assert len(fake_db.media_cache_upserts) == 1
+            media_cache = fake_db.media_cache_upserts[0]
+            assert media_cache["session_id"] == "session-1"
+            assert media_cache["message_id"] == "m-image"
+            assert media_cache["bucket_start_ts"] == 0
+            assert media_cache["media_kind"] == "image"
+            assert media_cache["source_fingerprint"].startswith("sha256:")
+            assert media_cache["summary_status"] == "ready"
+            assert media_cache["summary_text"] == "图片里是一张会议白板。"
+            assert media_cache["detail"] == {
+                'status': 'ready',
+                'text': '图片里是一张会议白板。',
+                'engine': 'local-vision',
+            }
+            assert media_cache["model_name"] == "local-vision"
+            assert media_cache["runtime_kind"] == "multimodal_sidecar"
+            assert media_cache["attempt_count"] == 1
+            assert media_cache["error_code"] == ""
         finally:
             await manager.close()
 
@@ -923,6 +945,24 @@ def test_message_manager_update_voice_transcript_persists_local_extra_and_emits(
             assert fake_event_bus.events[-1][1]['message_id'] == 'm-voice'
             assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
             assert fake_ai_memory_indexing_service.synced_voice_messages == [updated]
+            assert len(fake_db.media_cache_upserts) == 1
+            media_cache = fake_db.media_cache_upserts[0]
+            assert media_cache["session_id"] == "session-1"
+            assert media_cache["message_id"] == "m-voice"
+            assert media_cache["bucket_start_ts"] == 0
+            assert media_cache["media_kind"] == "audio"
+            assert media_cache["source_fingerprint"].startswith("sha256:")
+            assert media_cache["summary_status"] == "ready"
+            assert media_cache["summary_text"] == "今晚八点开会"
+            assert media_cache["detail"] == {
+                'status': 'ready',
+                'text': '今晚八点开会',
+                'engine': 'faster-whisper',
+            }
+            assert media_cache["model_name"] == "faster-whisper"
+            assert media_cache["runtime_kind"] == "local_asr"
+            assert media_cache["attempt_count"] == 1
+            assert media_cache["error_code"] == ""
         finally:
             await manager.close()
 

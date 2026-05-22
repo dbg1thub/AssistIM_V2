@@ -3036,6 +3036,92 @@ class MessageManager:
         )
         return message
 
+    async def _sync_conversation_summary_media_cache(
+        self,
+        message: ChatMessage,
+        *,
+        media_kind: str,
+        artifact: dict[str, Any],
+    ) -> None:
+        payload = self._build_conversation_summary_media_cache_payload(
+            message,
+            media_kind=media_kind,
+            artifact=artifact,
+        )
+        if not payload:
+            return
+        try:
+            await self._db.upsert_conversation_summary_media_cache(payload)
+        except Exception:
+            logger.exception(
+                "Failed to sync conversation summary media cache message_id=%s session_id=%s media_kind=%s",
+                message.message_id,
+                message.session_id,
+                media_kind,
+            )
+
+    @classmethod
+    def _build_conversation_summary_media_cache_payload(
+        cls,
+        message: ChatMessage,
+        *,
+        media_kind: str,
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_id = str(message.session_id or "").strip()
+        message_id = str(message.message_id or "").strip()
+        normalized_media_kind = str(media_kind or "").strip()
+        if not session_id or not message_id or not normalized_media_kind:
+            return {}
+
+        artifact_payload = dict(artifact or {})
+        status = str(artifact_payload.get("status") or "pending").strip() or "pending"
+        text = str(artifact_payload.get("text") or "") if status == "ready" else ""
+        model_name = str(
+            artifact_payload.get("model_name")
+            or artifact_payload.get("model_id")
+            or artifact_payload.get("engine")
+            or ""
+        ).strip()
+        runtime_kind = "local_asr" if normalized_media_kind == "audio" else "multimodal_sidecar"
+        updated_at = int(time.time())
+        return {
+            "session_id": session_id,
+            "message_id": message_id,
+            "bucket_start_ts": 0,
+            "media_kind": normalized_media_kind,
+            "source_fingerprint": cls._build_media_source_fingerprint(message),
+            "summary_status": status,
+            "summary_text": text,
+            "detail": artifact_payload,
+            "model_name": model_name,
+            "runtime_kind": runtime_kind,
+            "attempt_count": max(1, int(artifact_payload.get("attempt_count") or 1)),
+            "error_code": str(artifact_payload.get("error_code") or ""),
+            "updated_at": updated_at,
+        }
+
+    @staticmethod
+    def _build_media_source_fingerprint(message: ChatMessage) -> str:
+        extra = dict(message.extra or {})
+        source = {
+            "message_id": message.message_id,
+            "session_id": message.session_id,
+            "message_type": message.message_type.value,
+            "content": message.content,
+            "media": extra.get("media") or {},
+            "file": {
+                "name": extra.get("name") or extra.get("file_name") or "",
+                "size": extra.get("size") or extra.get("file_size") or 0,
+                "duration": extra.get("duration") or 0,
+                "local_path": extra.get("local_path") or "",
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return f"sha256:{digest}"
+
     async def update_message_voice_transcript(self, message_id: str, transcript: dict[str, Any]) -> Optional[ChatMessage]:
         """Persist one local voice transcription payload on a message and notify visible views."""
         normalized_message_id = str(message_id or "").strip()
@@ -3050,6 +3136,11 @@ class MessageManager:
         message.extra = updated_extra
         message.updated_at = datetime.now()
         await self._db.save_message(message)
+        await self._sync_conversation_summary_media_cache(
+            message,
+            media_kind="audio",
+            artifact=dict(transcript or {}),
+        )
 
         await self._event_bus.emit(
             MessageEvent.VOICE_TRANSCRIPT_UPDATED,
@@ -3125,6 +3216,11 @@ class MessageManager:
         message.extra = updated_extra
         message.updated_at = datetime.now()
         await self._db.save_message(message)
+        await self._sync_conversation_summary_media_cache(
+            message,
+            media_kind="image",
+            artifact=dict(summary or {}),
+        )
 
         await self._event_bus.emit(
             MessageEvent.IMAGE_SUMMARY_UPDATED,

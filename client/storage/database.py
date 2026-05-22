@@ -1533,6 +1533,134 @@ class Database:
         rows = await cursor.fetchall()
         return [int(row["bucket_start_ts"] or 0) for row in rows if int(row["bucket_start_ts"] or 0) > 0]
 
+    async def upsert_conversation_summary_media_cache(self, payload: dict[str, Any]) -> None:
+        """Insert or update one encrypted media sidecar summary used by local AI context."""
+        session_id = str(payload.get("session_id") or "").strip()
+        message_id = str(payload.get("message_id") or "").strip()
+        media_kind = str(payload.get("media_kind") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not message_id:
+            raise ValueError("message_id is required")
+        if not media_kind:
+            raise ValueError("media_kind is required")
+
+        summary_text = str(payload.get("summary_text") or "")
+        detail = payload.get("detail")
+        detail_json = str(payload.get("detail_json") or "")
+        if detail_json == "" and detail is not None:
+            detail_json = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+
+        now_ts = int(payload.get("updated_at") or time.time())
+        created_at = int(payload.get("created_at") or now_ts)
+        summary_text_ciphertext = SecureStorage.encrypt_text(summary_text) if summary_text else ""
+        detail_json_ciphertext = SecureStorage.encrypt_text(detail_json) if detail_json else ""
+
+        async with self._write_transaction("upsert_conversation_summary_media_cache"):
+            await self._db.execute(
+                """
+                INSERT INTO conversation_summary_media_cache (
+                    session_id,
+                    message_id,
+                    bucket_start_ts,
+                    media_kind,
+                    source_fingerprint,
+                    summary_status,
+                    summary_text_ciphertext,
+                    detail_json_ciphertext,
+                    model_name,
+                    runtime_kind,
+                    attempt_count,
+                    error_code,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id)
+                DO UPDATE SET
+                    session_id = excluded.session_id,
+                    bucket_start_ts = excluded.bucket_start_ts,
+                    media_kind = excluded.media_kind,
+                    source_fingerprint = excluded.source_fingerprint,
+                    summary_status = excluded.summary_status,
+                    summary_text_ciphertext = excluded.summary_text_ciphertext,
+                    detail_json_ciphertext = excluded.detail_json_ciphertext,
+                    model_name = excluded.model_name,
+                    runtime_kind = excluded.runtime_kind,
+                    attempt_count = excluded.attempt_count,
+                    error_code = excluded.error_code,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    message_id,
+                    int(payload.get("bucket_start_ts") or 0),
+                    media_kind,
+                    str(payload.get("source_fingerprint") or ""),
+                    str(payload.get("summary_status") or "pending"),
+                    summary_text_ciphertext,
+                    detail_json_ciphertext,
+                    str(payload.get("model_name") or ""),
+                    str(payload.get("runtime_kind") or ""),
+                    max(0, int(payload.get("attempt_count") or 0)),
+                    str(payload.get("error_code") or ""),
+                    created_at,
+                    now_ts,
+                ),
+            )
+
+    async def get_conversation_summary_media_cache(self, message_id: str) -> dict[str, Any] | None:
+        """Return one decrypted media sidecar summary by message id."""
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM conversation_summary_media_cache
+            WHERE message_id = ?
+            LIMIT 1
+            """,
+            (normalized_message_id,),
+        )
+        row = await cursor.fetchone()
+        return self._row_to_conversation_summary_media_cache(row) if row is not None else None
+
+    async def list_conversation_summary_media_cache(
+        self,
+        session_id: str,
+        *,
+        bucket_start_ts: int | None = None,
+        ready_only: bool = False,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return decrypted media sidecar summaries for one session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return []
+
+        clauses = ["session_id = ?"]
+        params: list[Any] = [normalized_session_id]
+        if bucket_start_ts is not None:
+            clauses.append("bucket_start_ts = ?")
+            params.append(int(bucket_start_ts or 0))
+        if ready_only:
+            clauses.append("summary_status = ?")
+            params.append("ready")
+
+        cursor = await self._db.execute(
+            f"""
+            SELECT *
+            FROM conversation_summary_media_cache
+            WHERE {" AND ".join(clauses)}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*params, max(1, int(limit or 20))),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_conversation_summary_media_cache(row) for row in rows]
+
     async def list_conversation_summary_buckets_for_rebuild(
         self,
         *,
@@ -2543,6 +2671,36 @@ class Database:
         except Exception:
             logger.warning("Failed to decrypt conversation memory item field", exc_info=True)
             return ""
+
+    @classmethod
+    def _row_to_conversation_summary_media_cache(cls, row: aiosqlite.Row) -> dict[str, Any]:
+        detail_text = cls._decrypt_memory_text(row["detail_json_ciphertext"])
+        detail: Any = {}
+        if detail_text:
+            try:
+                detail = json.loads(detail_text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                detail = {}
+        if not isinstance(detail, (dict, list)):
+            detail = {}
+
+        return {
+            "id": int(row["id"] or 0),
+            "session_id": str(row["session_id"] or ""),
+            "message_id": str(row["message_id"] or ""),
+            "bucket_start_ts": int(row["bucket_start_ts"] or 0),
+            "media_kind": str(row["media_kind"] or ""),
+            "source_fingerprint": str(row["source_fingerprint"] or ""),
+            "summary_status": str(row["summary_status"] or ""),
+            "summary_text": cls._decrypt_memory_text(row["summary_text_ciphertext"]),
+            "detail": detail,
+            "model_name": str(row["model_name"] or ""),
+            "runtime_kind": str(row["runtime_kind"] or ""),
+            "attempt_count": int(row["attempt_count"] or 0),
+            "error_code": str(row["error_code"] or ""),
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+        }
 
     @classmethod
     def _decrypt_memory_json_list(cls, value: object) -> list[str]:
