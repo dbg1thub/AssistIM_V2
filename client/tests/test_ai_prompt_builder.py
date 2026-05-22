@@ -310,6 +310,40 @@ def test_file_summary_request_is_local_and_bounded() -> None:
     assert "甲方同意周五前支付 100 元" in prompt
 
 
+def test_image_summary_request_is_local_vision_request() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+
+    request = builder.build_image_summary_request(
+        "D:/images/whiteboard.png",
+        session=session,
+        message_id="m-image",
+        task_id="image-summary-test",
+        mime_type="image/png",
+        display_name="whiteboard.png",
+    )
+
+    prompt = request.messages[0]["content"]
+    assert request.task_id == "image-summary-test"
+    assert request.session_id == "s1"
+    assert request.task_type == AITaskType.CHAT
+    assert request.must_be_local is True
+    assert request.stream is False
+    assert request.attachments == [
+        {
+            "type": "image",
+            "local_path": "D:/images/whiteboard.png",
+            "mime_type": "image/png",
+            "name": "whiteboard.png",
+        }
+    ]
+    assert request.metadata["source"] == "image_summary"
+    assert request.metadata["message_id"] == "m-image"
+    assert request.metadata["image_name"] == "whiteboard.png"
+    assert "请用中文总结这张聊天图片" in prompt
+    assert "不要逐字输出完整 OCR" in prompt
+
+
 def test_message_translation_request_is_local_and_mode_aware() -> None:
     builder = AIPromptBuilder()
     session = Session(session_id="s1", name="Alice", session_type="direct")

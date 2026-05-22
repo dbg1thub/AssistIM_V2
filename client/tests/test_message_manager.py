@@ -668,6 +668,56 @@ class FakeAIMemoryIndexingService:
         self.synced_voice_messages.append(message)
 
 
+def test_message_manager_update_image_summary_persists_local_extra_and_emits(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-image'] = ChatMessage(
+        message_id='m-image',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/image.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'name': 'image.png', 'keep': 'yes'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(
+        message_manager_module,
+        'get_ai_memory_indexing_service',
+        lambda: FakeAIMemoryIndexingService(),
+        raising=False,
+    )
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        await manager.initialize()
+        try:
+            updated = await manager.update_message_image_summary(
+                'm-image',
+                {'status': 'ready', 'text': '图片里是一张会议白板。', 'engine': 'local-vision'},
+            )
+
+            assert updated is not None
+            assert fake_db.messages['m-image'].extra['keep'] == 'yes'
+            assert fake_db.messages['m-image'].extra[IMAGE_SUMMARY_EXTRA_KEY] == {
+                'status': 'ready',
+                'text': '图片里是一张会议白板。',
+                'engine': 'local-vision',
+            }
+            assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.IMAGE_SUMMARY_UPDATED
+            assert fake_event_bus.events[-1][1]['message_id'] == 'm-image'
+            assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout() -> None:
     results = []
 

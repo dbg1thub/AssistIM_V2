@@ -7,6 +7,7 @@ from client.core.file_text_extraction import (
     FileTextExtractionError,
     FileTextExtractionResult,
 )
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.events.event_bus import EventBus
@@ -42,6 +43,42 @@ class _FakeTaskManager:
 
     async def run_once(self, request):
         self.requests.append(request)
+        return AITaskSnapshot(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            task_type=getattr(request.task_type, "value", request.task_type),
+            state=self.state,
+            content=self.content if self.state == AITaskState.DONE else "",
+            error_code=self.error_code,
+            error_message=self.error_code.value if self.error_code is not None else "",
+        )
+
+
+class _FakeImageSummaryTaskManager(_FakeTaskManager):
+    def __init__(
+        self,
+        *,
+        image_state: AITaskState = AITaskState.DONE,
+        image_content: str = "图片里是一张会议白板，写着周五前确认预算。",
+        image_error_code: AIErrorCode | None = None,
+    ) -> None:
+        super().__init__()
+        self.image_state = image_state
+        self.image_content = image_content
+        self.image_error_code = image_error_code
+
+    async def run_once(self, request):
+        self.requests.append(request)
+        if dict(getattr(request, "metadata", {}) or {}).get("source") == "image_summary":
+            return AITaskSnapshot(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                task_type=getattr(request.task_type, "value", request.task_type),
+                state=self.image_state,
+                content=self.image_content if self.image_state == AITaskState.DONE else "",
+                error_code=self.image_error_code,
+                error_message=self.image_error_code.value if self.image_error_code is not None else "",
+            )
         return AITaskSnapshot(
             task_id=request.task_id,
             session_id=request.session_id,
@@ -150,7 +187,7 @@ class _FakeDatabase:
         messages = [
             message
             for message in self.messages_by_session.get(session_id, [])
-            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}
+            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE, MessageType.IMAGE}
             and int(message.timestamp.timestamp()) >= int(bucket_start_ts or 0)
             and (bucket_end_ts is None or int(message.timestamp.timestamp()) <= int(bucket_end_ts or 0))
         ]
@@ -318,6 +355,7 @@ class _FakeMessageManager:
         self.download_attachment_calls: list[str] = []
         self.update_voice_transcript_calls: list[tuple[str, dict]] = []
         self.update_file_analysis_calls: list[tuple[str, dict | None, dict | None]] = []
+        self.update_image_summary_calls: list[tuple[str, dict]] = []
 
     async def download_attachment(self, message_id: str) -> str:
         self.download_attachment_calls.append(message_id)
@@ -334,6 +372,19 @@ class _FakeMessageManager:
                     continue
                 updated_extra = dict(message.extra or {})
                 updated_extra[VOICE_TRANSCRIPT_EXTRA_KEY] = payload
+                message.extra = updated_extra
+                return message
+        return None
+
+    async def update_message_image_summary(self, message_id: str, summary: dict) -> ChatMessage | None:
+        payload = dict(summary or {})
+        self.update_image_summary_calls.append((message_id, payload))
+        for messages in self._fake_db.messages_by_session.values():
+            for message in messages:
+                if message.message_id != message_id:
+                    continue
+                updated_extra = dict(message.extra or {})
+                updated_extra[IMAGE_SUMMARY_EXTRA_KEY] = payload
                 message.extra = updated_extra
                 return message
         return None
@@ -839,6 +890,105 @@ def test_conversation_summary_manager_continues_when_voice_model_missing(monkeyp
             assert fake_task_manager.requests
             prompt = fake_task_manager.requests[0].messages[0]["content"]
             assert "对方: [语音]" in prompt
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_generates_image_summary_before_bucket_summary(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeImageSummaryTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-image": "D:/images/whiteboard.png"})
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-image",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/whiteboard.png",
+                message_type=MessageType.IMAGE,
+                extra={"name": "whiteboard.png", "mime_type": "image/png"},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == ["m-image"]
+            assert fake_message_manager.update_image_summary_calls[0][0] == "m-image"
+            summary_payload = fake_message_manager.update_image_summary_calls[0][1]
+            assert summary_payload["status"] == "ready"
+            assert summary_payload["text"] == "图片里是一张会议白板，写着周五前确认预算。"
+            assert incoming.extra[IMAGE_SUMMARY_EXTRA_KEY]["status"] == "ready"
+            assert len(fake_task_manager.requests) == 2
+            image_request = fake_task_manager.requests[0]
+            assert image_request.metadata["source"] == "image_summary"
+            assert image_request.attachments[0]["local_path"] == "D:/images/whiteboard.png"
+            prompt = fake_task_manager.requests[1].messages[0]["content"]
+            assert "图片里是一张会议白板" in prompt
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+            assert bucket["message_count"] == 1
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_continues_when_image_summary_fails(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeImageSummaryTaskManager(
+        image_state=AITaskState.FAILED,
+        image_error_code=AIErrorCode.AI_MODEL_VISION_UNSUPPORTED,
+    )
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-image": "D:/images/unsupported.bmp"})
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-image",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/unsupported.bmp",
+                message_type=MessageType.IMAGE,
+                extra={"name": "unsupported.bmp"},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            summary_payload = fake_message_manager.update_image_summary_calls[0][1]
+            assert summary_payload["status"] == "failed"
+            assert summary_payload["reason"] == "vision_unavailable"
+            assert summary_payload["error_code"] == "AI_MODEL_VISION_UNSUPPORTED"
+            assert len(fake_task_manager.requests) == 2
+            prompt = fake_task_manager.requests[1].messages[0]["content"]
+            assert "对方: [图片]" in prompt
             bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
             assert bucket is not None
             assert bucket["summary_status"] == "ready"

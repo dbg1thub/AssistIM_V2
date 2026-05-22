@@ -12,10 +12,12 @@ from client.core.async_utils import bounded_cancel_gather
 from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTextExtractionError
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
 from client.events.event_bus import EventBus, get_event_bus
+from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_ann_index import ConversationAnnIndex
 from client.managers.conversation_vector_index import ConversationVectorIndex
@@ -62,6 +64,7 @@ class ConversationSummaryManager:
         event_bus: EventBus | None = None,
         task_manager: AITaskManager | None = None,
         prompt_builder: ConversationSummaryPromptBuilder | None = None,
+        ai_prompt_builder: AIPromptBuilder | None = None,
         vector_index: ConversationVectorIndex | None = None,
         ann_index: ConversationAnnIndex | None = None,
         message_manager: Any | None = None,
@@ -73,6 +76,7 @@ class ConversationSummaryManager:
         self._event_bus = event_bus or get_event_bus()
         self._task_manager = task_manager or get_ai_task_manager()
         self._prompt_builder = prompt_builder or ConversationSummaryPromptBuilder()
+        self._ai_prompt_builder = ai_prompt_builder or AIPromptBuilder()
         self._vector_index = vector_index or ConversationVectorIndex()
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
         self._message_manager = message_manager
@@ -81,6 +85,7 @@ class ConversationSummaryManager:
         self._ai_memory_store = ai_memory_store
         self._voice_transcription_semaphore = asyncio.Semaphore(1)
         self._file_text_extract_semaphore = asyncio.Semaphore(1)
+        self._image_summary_semaphore = asyncio.Semaphore(1)
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._idle_refresh_request_tasks: set[asyncio.Task] = set()
@@ -203,7 +208,7 @@ class ConversationSummaryManager:
         self._cancel_session_tasks(session_id)
 
     async def _process_message(self, session_id: str, message: ChatMessage) -> None:
-        if message.message_type not in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}:
+        if message.message_type not in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE, MessageType.IMAGE}:
             return
 
         session = await self._db.get_session(session_id)
@@ -339,6 +344,7 @@ class ConversationSummaryManager:
         )
         messages = await self._prepare_voice_transcripts_for_summary(messages)
         messages = await self._prepare_file_text_extracts_for_summary(messages)
+        messages = await self._prepare_image_summaries_for_summary(messages, session=session)
         built = self._prompt_builder.build_bucket_summary_request(
             session,
             messages,
@@ -571,6 +577,94 @@ class ConversationSummaryManager:
             message.message_id,
             text_extract=payload,
         )
+        return updated or message
+
+    async def _prepare_image_summaries_for_summary(
+        self,
+        messages: list[ChatMessage],
+        *,
+        session: Session,
+    ) -> list[ChatMessage]:
+        """Add local image summaries to summary input without blocking bucket summaries on vision failures."""
+        prepared: list[ChatMessage] = []
+        for message in list(messages or []):
+            if message.message_type != MessageType.IMAGE:
+                prepared.append(message)
+                continue
+            prepared.append(await self._prepare_image_summary_for_summary(message, session=session))
+        return prepared
+
+    async def _prepare_image_summary_for_summary(self, message: ChatMessage, *, session: Session) -> ChatMessage:
+        summary = dict((message.extra or {}).get(IMAGE_SUMMARY_EXTRA_KEY) or {})
+        status = str(summary.get("status") or "").strip()
+        if status == "ready" and str(summary.get("text") or "").strip():
+            return message
+        if status in {"pending", "failed", "skipped"}:
+            return message
+
+        try:
+            local_path = await self._require_message_manager().download_attachment(message.message_id)
+            request = self._ai_prompt_builder.build_image_summary_request(
+                local_path,
+                session=session,
+                message_id=message.message_id,
+                task_id=self._task_id("image-summary"),
+                mime_type=self._file_mime_type(message),
+                display_name=self._file_display_name(message),
+            )
+            async with self._image_summary_semaphore:
+                if self._closing or self._is_task_manager_closed():
+                    return message
+                snapshot = await self._task_manager.run_once(request)
+        except Exception as exc:
+            logger.warning(
+                "[image-summary] summary_image_unavailable message_id=%s session_id=%s error=%s",
+                message.message_id,
+                message.session_id,
+                exc,
+            )
+            return await self._persist_summary_image_summary(
+                message,
+                self._image_summary_payload(
+                    status="failed",
+                    reason="image_unavailable",
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc),
+                ),
+            )
+
+        if snapshot.state != AITaskState.DONE:
+            error_code = str(getattr(snapshot.error_code, "value", snapshot.error_code) or snapshot.finish_reason or "image_summary_failed")
+            payload = self._image_summary_payload(
+                status="failed",
+                reason=self._image_summary_failure_reason(error_code),
+                error_code=error_code,
+                error_message=str(snapshot.error_message or ""),
+            )
+            logger.info(
+                "[image-summary] summary_image_skipped message_id=%s session_id=%s reason=%s error_code=%s",
+                message.message_id,
+                message.session_id,
+                str(payload.get("reason") or ""),
+                error_code,
+            )
+            return await self._persist_summary_image_summary(message, payload)
+
+        text = " ".join(str(snapshot.content or "").strip().split())
+        if not text:
+            payload = self._image_summary_payload(status="skipped", reason="empty")
+        else:
+            payload = self._image_summary_payload(
+                status="ready",
+                text=text[: self._ai_prompt_builder.IMAGE_SUMMARY_OUTPUT_CHARS].rstrip(),
+                metadata=dict(getattr(snapshot, "metadata", {}) or {}),
+            )
+        return await self._persist_summary_image_summary(message, payload)
+
+    async def _persist_summary_image_summary(self, message: ChatMessage, payload: dict[str, Any]) -> ChatMessage:
+        message.extra = dict(message.extra or {})
+        message.extra[IMAGE_SUMMARY_EXTRA_KEY] = dict(payload or {})
+        updated = await self._require_message_manager().update_message_image_summary(message.message_id, payload)
         return updated or message
 
     def _require_message_manager(self) -> Any:
@@ -878,7 +972,7 @@ class ConversationSummaryManager:
         summary_messages = [
             message
             for message in messages
-            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}
+            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE, MessageType.IMAGE}
         ]
         latest = summary_messages[-1] if summary_messages else None
         return {
@@ -1436,6 +1530,49 @@ class ConversationSummaryManager:
             error_code=exc.code,
             error_message=str(exc),
         )
+
+    @staticmethod
+    def _image_summary_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        metadata: dict | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": str(status or "").strip(),
+            "engine": "local_vision",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if metadata:
+            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
+    @staticmethod
+    def _image_summary_failure_reason(error_code: str) -> str:
+        normalized = str(error_code or "").strip()
+        if normalized in {
+            "AI_MODEL_VISION_UNSUPPORTED",
+            "AI_VISION_PROJECTOR_NOT_FOUND",
+            "AI_VISION_RUNTIME_UNAVAILABLE",
+            "AI_LOCAL_REQUIRED_UNAVAILABLE",
+        }:
+            return "vision_unavailable"
+        if normalized == "AI_CONTEXT_TOO_LONG":
+            return "image_too_large"
+        if normalized == "AI_USER_CANCELLED":
+            return "cancelled"
+        return "runtime_error"
 
     @staticmethod
     def _file_text_error_status_reason(code: str) -> tuple[str, str]:

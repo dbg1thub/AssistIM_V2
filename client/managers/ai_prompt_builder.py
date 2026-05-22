@@ -83,6 +83,7 @@ class AIPromptBuilder:
     AI_CHAT_OUTPUT_CHARS = 0
     FILE_SUMMARY_INPUT_CHARS = 8000
     FILE_SUMMARY_OUTPUT_CHARS = 720
+    IMAGE_SUMMARY_OUTPUT_CHARS = 520
 
     _DRAFT_TASK_TYPES = {
         AIAssistAction.POLISH: AITaskType.INPUT_POLISH,
@@ -347,6 +348,64 @@ class AIPromptBuilder:
                 "message_id": str(message_id or ""),
                 "file_name": normalized_file_name,
                 "source_chars": len(source),
+                "prompt_chars": len(prompt),
+            },
+        )
+
+    def build_image_summary_request(
+        self,
+        image_path: str,
+        *,
+        session: Session | None = None,
+        message_id: str = "",
+        task_id: str = "",
+        mime_type: str = "",
+        display_name: str = "",
+    ) -> AIRequest:
+        """Build a local-only request for summarizing one chat image."""
+        normalized_path = str(image_path or "").strip()
+        if not normalized_path:
+            raise ValueError("image path is required")
+        normalized_name = _normalize_text(display_name, max_chars=120)
+        normalized_mime_type = str(mime_type or "").strip()
+        system_prompt = (
+            "你是 AssistIM 的聊天图片摘要助手。\n"
+            "使用标准聊天角色，不要输出思考过程，不要解释视觉模型过程。\n"
+            "只基于图片内容总结，不能编造图片中没有的信息。"
+        )
+        prompt = (
+            "请用中文总结这张聊天图片。\n"
+            "要求：\n"
+            "1. 输出 1-3 句，优先说明图片中的关键对象、文字、时间、金额、联系人和待办事项。\n"
+            "2. 如果图片像截图或白板，概括对聊天回复有用的信息。\n"
+            "3. 不要逐字输出完整 OCR，不要输出 Markdown 表格，不要添加图片外的信息。"
+        )
+        attachment: dict[str, Any] = {
+            "type": "image",
+            "local_path": normalized_path,
+        }
+        if normalized_mime_type:
+            attachment["mime_type"] = normalized_mime_type
+        if normalized_name:
+            attachment["name"] = normalized_name
+        return AIRequest(
+            task_id=task_id,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            task_type=AITaskType.CHAT,
+            privacy_scope=privacy_scope_for_session(session),
+            must_be_local=True,
+            stream=False,
+            temperature=0.2,
+            max_tokens=192,
+            max_output_chars=self.IMAGE_SUMMARY_OUTPUT_CHARS,
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+            attachments=[attachment],
+            metadata={
+                "source": "image_summary",
+                "message_id": str(message_id or ""),
+                "image_name": normalized_name,
+                "mime_type": normalized_mime_type,
                 "prompt_chars": len(prompt),
             },
         )

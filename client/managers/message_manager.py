@@ -60,6 +60,7 @@ class MessageEvent:
     TRANSLATION_UPDATED = "message_translation_updated"
     VOICE_TRANSCRIPT_UPDATED = "message_voice_transcript_updated"
     FILE_ANALYSIS_UPDATED = "message_file_analysis_updated"
+    IMAGE_SUMMARY_UPDATED = "message_image_summary_updated"
     DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
     RECOVERED = "message_recovered"
     SECURITY_PENDING = "message_security_pending"
@@ -3108,6 +3109,31 @@ class MessageManager:
                 message.message_id,
                 message.session_id,
             )
+        return message
+
+    async def update_message_image_summary(self, message_id: str, summary: dict[str, Any]) -> Optional[ChatMessage]:
+        """Persist one local image summary payload on a message and notify visible views."""
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        message = await self._db.get_message(normalized_message_id)
+        if message is None:
+            return None
+
+        updated_extra = dict(message.extra or {})
+        updated_extra[IMAGE_SUMMARY_EXTRA_KEY] = dict(summary or {})
+        message.extra = updated_extra
+        message.updated_at = datetime.now()
+        await self._db.save_message(message)
+
+        await self._event_bus.emit(
+            MessageEvent.IMAGE_SUMMARY_UPDATED,
+            {
+                "message_id": message.message_id,
+                "session_id": message.session_id,
+                "message": message,
+            },
+        )
         return message
 
     @staticmethod

@@ -1860,7 +1860,7 @@ class Database:
         normalized_start_ts = int(bucket_start_ts or 0)
         clauses = [
             "session_id = ?",
-            "message_type IN (?, ?, ?)",
+            "message_type IN (?, ?, ?, ?)",
             "timestamp >= ?",
         ]
         params: list[Any] = [
@@ -1868,6 +1868,7 @@ class Database:
             MessageType.TEXT.value,
             MessageType.VOICE.value,
             MessageType.FILE.value,
+            MessageType.IMAGE.value,
             normalized_start_ts,
         ]
         if bucket_end_ts is not None:
