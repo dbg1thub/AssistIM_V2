@@ -12,12 +12,9 @@ from client.core.async_utils import bounded_cancel_gather
 from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTextExtractionError
-from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
-from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
 from client.events.event_bus import EventBus, get_event_bus
-from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_ann_index import ConversationAnnIndex
 from client.managers.conversation_vector_index import ConversationVectorIndex
@@ -26,11 +23,11 @@ from client.managers.conversation_summary_prompt_builder import (
     ConversationSummaryRequest,
     StructuredConversationSummary,
 )
+from client.managers.message_artifact_preparer import MessageArtifactPreparer
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.models.message import ChatMessage, MessageType, Session
 from client.services.local_ai_memory_store import AIMemoryItem, get_local_ai_memory_store
-from client.services.local_voice_transcription_service import LocalVoiceTranscriptionRuntimeError
 from client.storage.database import Database, get_database
 
 
@@ -64,7 +61,7 @@ class ConversationSummaryManager:
         event_bus: EventBus | None = None,
         task_manager: AITaskManager | None = None,
         prompt_builder: ConversationSummaryPromptBuilder | None = None,
-        ai_prompt_builder: AIPromptBuilder | None = None,
+        artifact_preparer: MessageArtifactPreparer | None = None,
         vector_index: ConversationVectorIndex | None = None,
         ann_index: ConversationAnnIndex | None = None,
         message_manager: Any | None = None,
@@ -76,16 +73,17 @@ class ConversationSummaryManager:
         self._event_bus = event_bus or get_event_bus()
         self._task_manager = task_manager or get_ai_task_manager()
         self._prompt_builder = prompt_builder or ConversationSummaryPromptBuilder()
-        self._ai_prompt_builder = ai_prompt_builder or AIPromptBuilder()
         self._vector_index = vector_index or ConversationVectorIndex()
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
         self._message_manager = message_manager
-        self._voice_transcription_runtime = voice_transcription_runtime
         self._file_text_extractor = file_text_extractor
         self._ai_memory_store = ai_memory_store
-        self._voice_transcription_semaphore = asyncio.Semaphore(1)
         self._file_text_extract_semaphore = asyncio.Semaphore(1)
-        self._image_summary_semaphore = asyncio.Semaphore(1)
+        self._artifact_preparer = artifact_preparer or MessageArtifactPreparer(
+            message_manager=message_manager,
+            voice_transcription_runtime=voice_transcription_runtime,
+            task_manager=self._task_manager,
+        )
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._idle_refresh_request_tasks: set[asyncio.Task] = set()
@@ -410,98 +408,7 @@ class ConversationSummaryManager:
         return prepared
 
     async def _prepare_voice_transcript_for_summary(self, message: ChatMessage) -> ChatMessage:
-        transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
-        status = str(transcript.get("status") or "").strip()
-        if status == "ready" and str(transcript.get("text") or "").strip():
-            return message
-        if status in {"pending", "failed", "skipped"}:
-            return message
-
-        duration_seconds = self._voice_message_duration_seconds(message)
-        if duration_seconds > VOICE_TRANSCRIPT_MAX_SECONDS:
-            return await self._persist_summary_voice_transcript(
-                message,
-                self._voice_transcript_payload(
-                    status="skipped",
-                    reason="audio_too_long",
-                    duration_seconds=duration_seconds,
-                ),
-            )
-
-        try:
-            local_path = await self._require_message_manager().download_attachment(message.message_id)
-            async with self._voice_transcription_semaphore:
-                result = await self._require_voice_transcription_runtime().transcribe(
-                    local_path,
-                    duration_seconds=duration_seconds or None,
-                )
-        except LocalVoiceTranscriptionRuntimeError as exc:
-            if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG":
-                payload = self._voice_transcript_payload(
-                    status="skipped",
-                    reason="audio_too_long",
-                    duration_seconds=duration_seconds,
-                    error_code=exc.code,
-                    error_message=str(exc),
-                )
-            else:
-                reason = "model_missing" if exc.code == "VOICE_TRANSCRIPT_MODEL_NOT_FOUND" else "runtime_error"
-                payload = self._voice_transcript_payload(
-                    status="failed",
-                    reason=reason,
-                    duration_seconds=duration_seconds,
-                    error_code=exc.code,
-                    error_message=str(exc),
-                )
-            logger.info(
-                "[voice-asr] summary_voice_transcript_skipped message_id=%s session_id=%s reason=%s error_code=%s",
-                message.message_id,
-                message.session_id,
-                str(payload.get("reason") or ""),
-                exc.code,
-            )
-            return await self._persist_summary_voice_transcript(message, payload)
-        except Exception as exc:
-            logger.warning(
-                "[voice-asr] summary_voice_transcript_unavailable message_id=%s session_id=%s error=%s",
-                message.message_id,
-                message.session_id,
-                exc,
-            )
-            return await self._persist_summary_voice_transcript(
-                message,
-                self._voice_transcript_payload(
-                    status="failed",
-                    reason="audio_unavailable",
-                    duration_seconds=duration_seconds,
-                    error_code=exc.__class__.__name__,
-                    error_message=str(exc),
-                ),
-            )
-
-        text = " ".join(str(result.text or "").strip().split())
-        if not text:
-            payload = self._voice_transcript_payload(
-                status="skipped",
-                reason="no_speech",
-                duration_seconds=duration_seconds,
-            )
-        else:
-            payload = self._voice_transcript_payload(
-                status="ready",
-                text=text,
-                duration_seconds=duration_seconds,
-                language=str(result.language or ""),
-                language_probability=float(result.language_probability or 0.0),
-                metadata=dict(result.metadata or {}),
-            )
-        return await self._persist_summary_voice_transcript(message, payload)
-
-    async def _persist_summary_voice_transcript(self, message: ChatMessage, payload: dict[str, Any]) -> ChatMessage:
-        message.extra = dict(message.extra or {})
-        message.extra[VOICE_TRANSCRIPT_EXTRA_KEY] = dict(payload or {})
-        updated = await self._require_message_manager().update_message_voice_transcript(message.message_id, payload)
-        return updated or message
+        return await self._artifact_preparer.prepare_voice_transcript(message)
 
     async def _prepare_file_text_extracts_for_summary(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Add local file text extracts to summary input without showing a visible file summary."""
@@ -595,77 +502,7 @@ class ConversationSummaryManager:
         return prepared
 
     async def _prepare_image_summary_for_summary(self, message: ChatMessage, *, session: Session) -> ChatMessage:
-        summary = dict((message.extra or {}).get(IMAGE_SUMMARY_EXTRA_KEY) or {})
-        status = str(summary.get("status") or "").strip()
-        if status == "ready" and str(summary.get("text") or "").strip():
-            return message
-        if status in {"pending", "failed", "skipped"}:
-            return message
-
-        try:
-            local_path = await self._require_message_manager().download_attachment(message.message_id)
-            request = self._ai_prompt_builder.build_image_summary_request(
-                local_path,
-                session=session,
-                message_id=message.message_id,
-                task_id=self._task_id("image-summary"),
-                mime_type=self._file_mime_type(message),
-                display_name=self._file_display_name(message),
-            )
-            async with self._image_summary_semaphore:
-                if self._closing or self._is_task_manager_closed():
-                    return message
-                snapshot = await self._task_manager.run_once(request)
-        except Exception as exc:
-            logger.warning(
-                "[image-summary] summary_image_unavailable message_id=%s session_id=%s error=%s",
-                message.message_id,
-                message.session_id,
-                exc,
-            )
-            return await self._persist_summary_image_summary(
-                message,
-                self._image_summary_payload(
-                    status="failed",
-                    reason="image_unavailable",
-                    error_code=exc.__class__.__name__,
-                    error_message=str(exc),
-                ),
-            )
-
-        if snapshot.state != AITaskState.DONE:
-            error_code = str(getattr(snapshot.error_code, "value", snapshot.error_code) or snapshot.finish_reason or "image_summary_failed")
-            payload = self._image_summary_payload(
-                status="failed",
-                reason=self._image_summary_failure_reason(error_code),
-                error_code=error_code,
-                error_message=str(snapshot.error_message or ""),
-            )
-            logger.info(
-                "[image-summary] summary_image_skipped message_id=%s session_id=%s reason=%s error_code=%s",
-                message.message_id,
-                message.session_id,
-                str(payload.get("reason") or ""),
-                error_code,
-            )
-            return await self._persist_summary_image_summary(message, payload)
-
-        text = " ".join(str(snapshot.content or "").strip().split())
-        if not text:
-            payload = self._image_summary_payload(status="skipped", reason="empty")
-        else:
-            payload = self._image_summary_payload(
-                status="ready",
-                text=text[: self._ai_prompt_builder.IMAGE_SUMMARY_OUTPUT_CHARS].rstrip(),
-                metadata=dict(getattr(snapshot, "metadata", {}) or {}),
-            )
-        return await self._persist_summary_image_summary(message, payload)
-
-    async def _persist_summary_image_summary(self, message: ChatMessage, payload: dict[str, Any]) -> ChatMessage:
-        message.extra = dict(message.extra or {})
-        message.extra[IMAGE_SUMMARY_EXTRA_KEY] = dict(payload or {})
-        updated = await self._require_message_manager().update_message_image_summary(message.message_id, payload)
-        return updated or message
+        return await self._artifact_preparer.prepare_image_summary(message, session=session)
 
     def _require_message_manager(self) -> Any:
         if self._message_manager is None:
@@ -673,13 +510,6 @@ class ConversationSummaryManager:
 
             self._message_manager = get_message_manager()
         return self._message_manager
-
-    def _require_voice_transcription_runtime(self) -> Any:
-        if self._voice_transcription_runtime is None:
-            from client.services.local_voice_transcription_service import get_local_voice_transcription_runtime
-
-            self._voice_transcription_runtime = get_local_voice_transcription_runtime()
-        return self._voice_transcription_runtime
 
     def _require_file_text_extractor(self) -> Any:
         if self._file_text_extractor is None:
@@ -1438,48 +1268,6 @@ class ConversationSummaryManager:
         return tuple(keywords[:12])
 
     @staticmethod
-    def _voice_message_duration_seconds(message: ChatMessage) -> int:
-        try:
-            return max(0, int(float((message.extra or {}).get("duration") or 0)))
-        except (TypeError, ValueError):
-            return 0
-
-    @staticmethod
-    def _voice_transcript_payload(
-        *,
-        status: str,
-        text: str = "",
-        reason: str = "",
-        duration_seconds: int = 0,
-        language: str = "",
-        language_probability: float = 0.0,
-        metadata: dict | None = None,
-        error_code: str = "",
-        error_message: str = "",
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "status": str(status or "").strip(),
-            "engine": "faster-whisper",
-            "duration_seconds": max(0, int(duration_seconds or 0)),
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        if text:
-            payload["text"] = text
-        if reason:
-            payload["reason"] = reason
-        if language:
-            payload["language"] = language
-        if language_probability:
-            payload["language_probability"] = float(language_probability)
-        if metadata:
-            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
-        if error_code:
-            payload["error_code"] = error_code
-        if error_message:
-            payload["error_message"] = error_message
-        return payload
-
-    @staticmethod
     def _file_text_extract_payload(
         *,
         status: str,
@@ -1530,49 +1318,6 @@ class ConversationSummaryManager:
             error_code=exc.code,
             error_message=str(exc),
         )
-
-    @staticmethod
-    def _image_summary_payload(
-        *,
-        status: str,
-        text: str = "",
-        reason: str = "",
-        metadata: dict | None = None,
-        error_code: str = "",
-        error_message: str = "",
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "status": str(status or "").strip(),
-            "engine": "local_vision",
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        if text:
-            payload["text"] = text
-        if reason:
-            payload["reason"] = reason
-        if metadata:
-            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
-        if error_code:
-            payload["error_code"] = error_code
-        if error_message:
-            payload["error_message"] = error_message
-        return payload
-
-    @staticmethod
-    def _image_summary_failure_reason(error_code: str) -> str:
-        normalized = str(error_code or "").strip()
-        if normalized in {
-            "AI_MODEL_VISION_UNSUPPORTED",
-            "AI_VISION_PROJECTOR_NOT_FOUND",
-            "AI_VISION_RUNTIME_UNAVAILABLE",
-            "AI_LOCAL_REQUIRED_UNAVAILABLE",
-        }:
-            return "vision_unavailable"
-        if normalized == "AI_CONTEXT_TOO_LONG":
-            return "image_too_large"
-        if normalized == "AI_USER_CANCELLED":
-            return "cancelled"
-        return "runtime_error"
 
     @staticmethod
     def _file_text_error_status_reason(code: str) -> tuple[str, str]:

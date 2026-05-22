@@ -78,6 +78,23 @@ def _peek_ai_controller():
     return peek_ai_controller()
 
 
+def _get_message_artifact_preparation_manager():
+    """Resolve the media artifact preparation manager lazily to keep test stubs isolated."""
+    from client.managers.message_artifact_preparer import get_message_artifact_preparation_manager
+
+    return get_message_artifact_preparation_manager()
+
+
+def _peek_message_artifact_preparation_manager():
+    """Resolve the media artifact preparation manager singleton lazily."""
+    try:
+        from client.managers.message_artifact_preparer import peek_message_artifact_preparation_manager
+    except ImportError:
+        return None
+
+    return peek_message_artifact_preparation_manager()
+
+
 @dataclass(frozen=True)
 class AuthAttemptResult:
     """One completed auth attempt plus the runtime generation it committed, if any."""
@@ -645,6 +662,9 @@ class Application:
         sound_manager = get_sound_manager()
         await sound_manager.initialize()
 
+        logger.info("Initializing message artifact preparation manager...")
+        await _get_message_artifact_preparation_manager().initialize()
+
         logger.info("Authenticated runtime initialized for user %s", current_user_id)
 
     # =========================================================
@@ -1102,10 +1122,11 @@ class Application:
             logger.exception("Local AI memory artifact backfill failed")
             return
         logger.info(
-            "[ai-perf] local_ai_memory_artifact_backfill_done processed=%s files=%s voices=%s failed=%s",
+            "[ai-perf] local_ai_memory_artifact_backfill_done processed=%s files=%s voices=%s images=%s failed=%s",
             int(stats.get("processed", 0) or 0),
             int(stats.get("files", 0) or 0),
             int(stats.get("voices", 0) or 0),
+            int(stats.get("images", 0) or 0),
             int(stats.get("failed", 0) or 0),
         )
 
@@ -1181,6 +1202,11 @@ class Application:
             _peek_ai_controller,
         ):
             close_failures.append("ai_controller")
+        if not await self._close_optional_component(
+            "Message artifact preparation manager close during logout failed",
+            _peek_message_artifact_preparation_manager,
+        ):
+            close_failures.append("message_artifact_preparation_manager")
         if not await self._close_optional_component(
             "Message manager close during logout failed",
             peek_message_manager,
@@ -1296,6 +1322,7 @@ class Application:
         await self._close_optional_component("Discovery controller close failed", _peek_discovery_controller)
         await self._close_optional_component("AI controller close failed", _peek_ai_controller)
         await self._close_optional_component("Auth controller close failed", peek_auth_controller)
+        await self._close_optional_component("Message artifact preparation manager close failed", _peek_message_artifact_preparation_manager)
         await self._close_optional_component("Message manager close failed", peek_message_manager)
         await self._close_optional_component("Session manager close failed", peek_session_manager)
         await self._close_optional_component("Connection manager close failed", peek_connection_manager)
