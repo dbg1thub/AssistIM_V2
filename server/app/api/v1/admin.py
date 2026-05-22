@@ -12,6 +12,7 @@ from app.core.errors import AppError, ErrorCode
 from app.dependencies.admin_dependency import get_current_admin_user, normalize_user_role
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
+from app.realtime.auth_runtime_cleanup import end_active_calls_for_auth_runtime
 from app.realtime.force_logout_reasons import (
     FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER,
     FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT,
@@ -1132,6 +1133,11 @@ async def disable_admin_user(
         reason=FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER,
         payload=force_logout_payload(FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER),
     )
+    await end_active_calls_for_auth_runtime(
+        user_id,
+        reason=FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER,
+        connection_manager=connection_manager,
+    )
     return success_response(result)
 
 
@@ -1173,6 +1179,11 @@ async def force_logout_admin_user(
         close_code=4001,
         reason=FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT,
         payload=force_logout_payload(FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT),
+    )
+    await end_active_calls_for_auth_runtime(
+        user_id,
+        reason=FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT,
+        connection_manager=connection_manager,
     )
     result["disconnected"] = bool(disconnected)
     return success_response(result)

@@ -1225,6 +1225,11 @@ class Application:
         ):
             close_failures.append("session_manager")
         if not await self._close_optional_component(
+            "Call manager close during logout failed",
+            peek_call_manager,
+        ):
+            close_failures.append("call_manager")
+        if not await self._close_optional_component(
             "Connection manager close during logout failed",
             peek_connection_manager,
         ):
@@ -1239,11 +1244,6 @@ class Application:
             peek_sound_manager,
         ):
             close_failures.append("sound_manager")
-        if not await self._close_optional_component(
-            "Call manager close during logout failed",
-            peek_call_manager,
-        ):
-            close_failures.append("call_manager")
         if not await self._close_optional_component(
             "Search manager close during logout failed",
             peek_search_manager,
@@ -1332,13 +1332,13 @@ class Application:
         await self._close_optional_component("Message artifact preparation manager close failed", _peek_message_artifact_preparation_manager)
         await self._close_optional_component("Message manager close failed", peek_message_manager)
         await self._close_optional_component("Session manager close failed", peek_session_manager)
+        await self._close_optional_component("Call manager close failed", peek_call_manager)
         await self._close_optional_component("Connection manager close failed", peek_connection_manager)
         await self._close_optional_component(
             "WebSocket client close failed",
             peek_websocket_client,
         )
         await self._close_optional_component("Sound manager close failed", peek_sound_manager)
-        await self._close_optional_component("Call manager close failed", peek_call_manager)
         await self._close_optional_component("Search manager close failed", peek_search_manager)
         await self._close_optional_component("AI task manager close failed", peek_ai_task_manager)
         await self._close_optional_component("AI service close failed", peek_ai_service)

@@ -14,6 +14,7 @@ from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
+from app.realtime.auth_runtime_cleanup import end_active_calls_for_auth_runtime
 from app.realtime.force_logout_reasons import (
     FORCE_LOGOUT_REASON_LOGOUT,
     FORCE_LOGOUT_REASON_PASSWORD_RESET,
@@ -75,6 +76,11 @@ async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disc
         if strict_disconnect:
             raise AppError(ErrorCode.INTERNAL_ERROR, "failed to replace existing session", 500)
         return
+    await end_active_calls_for_auth_runtime(
+        user_id,
+        reason=reason,
+        connection_manager=connection_manager,
+    )
 
 
 @router.post(

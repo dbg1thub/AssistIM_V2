@@ -34,6 +34,8 @@ _MAIN_RUNTIME_STUB_MODULES = (
     "client.ui.windows.auth_interface",
     "client.core.config",
     "client.core.i18n",
+    "dateutil",
+    "dateutil.tz",
 )
 
 
@@ -254,6 +256,8 @@ def _load_main_module():
         "client.ui.windows.auth_interface",
         "client.core.config",
         "client.core.i18n",
+        "dateutil",
+        "dateutil.tz",
     ):
         sys.modules.pop(module_name, None)
 
@@ -319,6 +323,13 @@ def _load_main_module():
         sys.modules["qasync"] = qasync
     if not hasattr(qasync, "QEventLoop"):
         qasync.QEventLoop = type("QEventLoop", (), {})
+
+    dateutil_module = types.ModuleType("dateutil")
+    dateutil_module.__path__ = []
+    dateutil_tz_module = types.ModuleType("dateutil.tz")
+    dateutil_module.tz = dateutil_tz_module
+    sys.modules["dateutil"] = dateutil_module
+    sys.modules["dateutil.tz"] = dateutil_tz_module
 
     qfluentwidgets = sys.modules.get("qfluentwidgets")
     if qfluentwidgets is None:
@@ -2040,6 +2051,35 @@ def test_application_teardown_runtime_closes_websocket_even_when_connection_mana
         await app._teardown_authenticated_runtime()
 
         assert events == ["connection_manager", "websocket"]
+
+    asyncio.run(scenario())
+
+
+def test_application_teardown_runtime_closes_call_manager_before_transport(monkeypatch) -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+
+    class _Closeable:
+        async def close(self) -> None:
+            events.append(self.name)
+
+    call_manager = _Closeable()
+    call_manager.name = "call_manager"
+    connection_manager = _Closeable()
+    connection_manager.name = "connection_manager"
+    websocket_client = _Closeable()
+    websocket_client.name = "websocket"
+
+    monkeypatch.setattr(main_module, "peek_call_manager", lambda: call_manager)
+    monkeypatch.setattr(main_module, "peek_connection_manager", lambda: connection_manager)
+    monkeypatch.setattr(main_module, "peek_websocket_client", lambda: websocket_client)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        await app._teardown_authenticated_runtime()
+
+        assert events == ["call_manager", "connection_manager", "websocket"]
 
     asyncio.run(scenario())
 

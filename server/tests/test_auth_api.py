@@ -822,6 +822,57 @@ def test_force_login_disconnects_existing_runtime_before_rotating_session(client
     assert still_valid_me.status_code == 200
 
 
+def test_force_login_ends_existing_call_runtime(client: TestClient, monkeypatch) -> None:
+    from app.api.v1 import auth as auth_routes
+    from app.realtime.call_registry import get_call_registry
+
+    register_response = register_user_response(client, "force-call-user", nickname="Force Call User")
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    user_id = payload["user"]["id"]
+
+    peer_payload = register_user(client, "force-call-peer", nickname="Force Call Peer")
+    peer_id = peer_payload["user"]["id"]
+
+    registry = get_call_registry()
+    registry.create(
+        call_id="force-call-1",
+        session_id="force-session-1",
+        initiator_id=user_id,
+        recipient_id=peer_id,
+        media_type="voice",
+    )
+    connection_manager.bind_user("force-call-conn", user_id)
+
+    sent_payloads: list[tuple[list[str], dict]] = []
+
+    async def fake_send_json_to_users(user_ids: list[str], payload: dict, exclude_connection_id: str | None = None) -> set[str]:
+        sent_payloads.append((list(user_ids), payload))
+        return set(user_ids)
+
+    monkeypatch.setattr(auth_routes.connection_manager, "send_json_to_users", fake_send_json_to_users)
+
+    forced_login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "force-call-user",
+            "password": "secret123",
+            "force": True,
+        },
+    )
+
+    assert forced_login_response.status_code == 200, forced_login_response.text
+    assert registry.get("force-call-1") is None
+    assert sent_payloads
+    target_user_ids, hangup_payload = sent_payloads[-1]
+    assert set(target_user_ids) == {user_id, peer_id}
+    assert hangup_payload["type"] == "call_hangup"
+    assert hangup_payload["data"]["call_id"] == "force-call-1"
+    assert hangup_payload["data"]["status"] == "failed"
+    assert hangup_payload["data"]["reason"] == "session_replaced"
+    assert hangup_payload["data"]["actor_id"] == user_id
+
+
 def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: TestClient, monkeypatch) -> None:
     import pytest
 
