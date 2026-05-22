@@ -660,6 +660,7 @@ class FakeAIMemoryIndexingService:
     def __init__(self) -> None:
         self.synced_messages: list[ChatMessage] = []
         self.synced_voice_messages: list[ChatMessage] = []
+        self.synced_image_messages: list[ChatMessage] = []
 
     async def sync_file_analysis_message(self, message: ChatMessage) -> None:
         self.synced_messages.append(message)
@@ -667,11 +668,15 @@ class FakeAIMemoryIndexingService:
     async def sync_voice_transcript_message(self, message: ChatMessage) -> None:
         self.synced_voice_messages.append(message)
 
+    async def sync_image_summary_message(self, message: ChatMessage) -> None:
+        self.synced_image_messages.append(message)
+
 
 def test_message_manager_update_image_summary_persists_local_extra_and_emits(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
     fake_db = FakeDatabase()
+    fake_ai_memory_indexing_service = FakeAIMemoryIndexingService()
     fake_db.messages['m-image'] = ChatMessage(
         message_id='m-image',
         session_id='session-1',
@@ -689,7 +694,7 @@ def test_message_manager_update_image_summary_persists_local_extra_and_emits(mon
     monkeypatch.setattr(
         message_manager_module,
         'get_ai_memory_indexing_service',
-        lambda: FakeAIMemoryIndexingService(),
+        lambda: fake_ai_memory_indexing_service,
         raising=False,
     )
 
@@ -712,6 +717,7 @@ def test_message_manager_update_image_summary_persists_local_extra_and_emits(mon
             assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.IMAGE_SUMMARY_UPDATED
             assert fake_event_bus.events[-1][1]['message_id'] == 'm-image'
             assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+            assert fake_ai_memory_indexing_service.synced_image_messages == [updated]
         finally:
             await manager.close()
 

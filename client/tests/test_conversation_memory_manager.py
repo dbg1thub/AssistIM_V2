@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.managers.conversation_vector_index import DenseVector
@@ -9,7 +9,7 @@ from client.services.local_ai_memory_store import AIMemoryItem, AIMemorySearchRe
 from client.storage.database import Database
 
 
-AI_MEMORY_SOURCE_TYPES = ("conversation_summary", "file_summary", "file_text_chunk", "voice_transcript")
+AI_MEMORY_SOURCE_TYPES = ("conversation_summary", "file_summary", "file_text_chunk", "voice_transcript", "image_summary")
 
 
 class _FakeMemoryDatabase:
@@ -293,6 +293,27 @@ def _voice_ai_memory_item() -> AIMemoryItem:
     )
 
 
+def _image_ai_memory_item() -> AIMemoryItem:
+    return AIMemoryItem(
+        owner_scope="account:test1",
+        source_type="image_summary",
+        source_id="image:s-image:m-image",
+        title="whiteboard.png",
+        text="图片摘要：会议白板写着周五前确认预算，并标注负责人是 Alice。",
+        vector=tuple(_FakeVectorIndex._vector({"会议白板", "预算", "Alice"})),
+        embedding_model_id="fake-embedding-model",
+        metadata={
+            "session_id": "s-image",
+            "message_id": "m-image",
+            "image_name": "whiteboard.png",
+            "bucket_start_ts": _ts("2026-04-20T15:00:00"),
+            "bucket_end_ts": _ts("2026-04-20T15:00:00"),
+            "keywords": ["图片消息", "whiteboard.png", "预算"],
+            "participants": ["alice"],
+        },
+    )
+
+
 def _make_memory_manager(
     db: _FakeMemoryDatabase,
     planner: _FakeSemanticPlanner,
@@ -333,6 +354,10 @@ class _FakeMessage:
 
 def _ts(value: str) -> int:
     return int(datetime.fromisoformat(value).timestamp())
+
+
+def _recent_ts(*, minutes_offset: int = 0) -> int:
+    return int((datetime.now() - timedelta(days=1) + timedelta(minutes=minutes_offset)).timestamp())
 
 
 def _rag_plan(
@@ -399,24 +424,24 @@ def test_conversation_memory_manager_formats_history_context() -> None:
     async def scenario() -> None:
         db = _FakeMemoryDatabase(
             [
-                {
-                    "session_id": "s1",
-                    "source_type": "summary",
-                    "source_id": "summary:1",
-                    "start_ts": _ts("2026-04-21T10:00:00"),
-                    "end_ts": _ts("2026-04-21T10:05:00"),
-                    "title": "张三 2026-04-21 10:00-10:05",
-                    "text": "确认了周末去咖啡店见面，语气轻松。",
+                    {
+                        "session_id": "s1",
+                        "source_type": "summary",
+                        "source_id": "summary:1",
+                        "start_ts": _recent_ts(minutes_offset=0),
+                        "end_ts": _recent_ts(minutes_offset=5),
+                        "title": "张三 2026-04-21 10:00-10:05",
+                        "text": "确认了周末去咖啡店见面，语气轻松。",
                     "keywords": ["周末", "咖啡店"],
                     "participants": ["张三", "我"],
                 },
                 {
-                    "session_id": "s2",
-                    "source_type": "summary",
-                    "source_id": "summary:2",
-                    "start_ts": _ts("2026-04-21T11:00:00"),
-                    "end_ts": _ts("2026-04-21T11:05:00"),
-                    "title": "李四 2026-04-21 11:00-11:05",
+                        "session_id": "s2",
+                        "source_type": "summary",
+                        "source_id": "summary:2",
+                        "start_ts": _recent_ts(minutes_offset=60),
+                        "end_ts": _recent_ts(minutes_offset=65),
+                        "title": "李四 2026-04-21 11:00-11:05",
                     "text": "讨论了文件整理。",
                     "keywords": ["文件"],
                     "participants": ["李四"],
@@ -460,13 +485,13 @@ def test_conversation_memory_manager_searches_after_explicit_confirmation() -> N
     async def scenario() -> None:
         db = _FakeMemoryDatabase(
             [
-                {
-                    "session_id": "s1",
-                    "source_type": "summary",
-                    "source_id": "summary:1",
-                    "start_ts": _ts("2026-04-21T10:00:00"),
-                    "end_ts": _ts("2026-04-21T10:05:00"),
-                    "title": "张三 2026-04-21 10:00-10:05",
+                    {
+                        "session_id": "s1",
+                        "source_type": "summary",
+                        "source_id": "summary:1",
+                        "start_ts": _recent_ts(minutes_offset=0),
+                        "end_ts": _recent_ts(minutes_offset=5),
+                        "title": "张三 2026-04-21 10:00-10:05",
                     "text": "确认了周末去咖啡店见面，语气轻松。",
                     "keywords": ["周末", "咖啡店"],
                     "participants": ["张三", "我"],
@@ -589,6 +614,24 @@ def test_conversation_memory_manager_retrieves_voice_transcript_from_ai_memory_s
         assert context.has_context is True
         assert "语音消息" in context.lines[0]
         assert "南山咖啡店" in context.lines[0]
+        assert db.ann_calls == []
+        assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_retrieves_image_summary_from_ai_memory_store() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase([])
+        store = _FakeAIMemoryStore([_image_ai_memory_item()])
+        planner = _FakeSemanticPlanner(_rag_plan("预算", participants=[]))
+        manager = _make_memory_manager(db, planner, ai_memory_store=store)
+
+        context = await manager.build_rag_context_for_ai_chat("白板里预算是什么？")
+
+        assert context.has_context is True
+        assert "whiteboard.png" in context.lines[0]
+        assert "周五前确认预算" in context.lines[0]
         assert db.ann_calls == []
         assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
 

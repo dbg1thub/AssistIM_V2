@@ -3134,6 +3134,14 @@ class MessageManager:
                 "message": message,
             },
         )
+        try:
+            await self._ai_memory_indexing_service.sync_image_summary_message(message)
+        except Exception:
+            logger.exception(
+                "Failed to sync image summary into local AI memory message_id=%s session_id=%s",
+                message.message_id,
+                message.session_id,
+            )
         return message
 
     @staticmethod

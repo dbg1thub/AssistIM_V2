@@ -62,6 +62,7 @@ if "aiosqlite" not in sys.modules:
 
 from client.storage import database as database_module
 from client.storage.database import Database
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 
@@ -1318,6 +1319,19 @@ def test_database_lists_ready_local_ai_artifact_messages() -> None:
                 )
                 await database.save_message(
                     ChatMessage(
+                        message_id="m-image-ready",
+                        session_id="session-1",
+                        sender_id="bob",
+                        content="/uploads/whiteboard.png",
+                        message_type=MessageType.IMAGE,
+                        status=MessageStatus.RECEIVED,
+                        timestamp=now,
+                        updated_at=now,
+                        extra={IMAGE_SUMMARY_EXTRA_KEY: {"status": "ready", "text": "图片内容"}},
+                    )
+                )
+                await database.save_message(
+                    ChatMessage(
                         message_id="m-file-pending",
                         session_id="session-1",
                         sender_id="alice",
@@ -1332,7 +1346,7 @@ def test_database_lists_ready_local_ai_artifact_messages() -> None:
 
                 messages = await database.list_local_ai_artifact_messages(limit=10)
 
-                assert [message.message_id for message in messages] == ["m-file-ready", "m-voice-ready"]
+                assert [message.message_id for message in messages] == ["m-file-ready", "m-voice-ready", "m-image-ready"]
             finally:
                 await database.close()
 

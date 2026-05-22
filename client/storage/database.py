@@ -2932,6 +2932,11 @@ class Database:
                     AND json_extract(extra, '$.voice_transcript.status') = 'ready'
                     AND LENGTH(COALESCE(json_extract(extra, '$.voice_transcript.text'), '')) > 0
                 )
+                OR (
+                    message_type = 'image'
+                    AND json_extract(extra, '$.image_summary.status') = 'ready'
+                    AND LENGTH(COALESCE(json_extract(extra, '$.image_summary.text'), '')) > 0
+                )
             ORDER BY updated_at ASC, order_ts ASC, rowid ASC
             LIMIT ?
             """,

@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_vector_index import DenseVector
 from client.models.message import ChatMessage, MessageStatus, MessageType
@@ -152,6 +153,37 @@ def _voice_message(
                 "language": "zh",
                 "engine": "faster-whisper",
                 "model": "small",
+            },
+        },
+    )
+
+
+def _image_message(
+    *,
+    session_id: str = "session-1",
+    sender_id: str = "alice",
+    is_self: bool = False,
+    summary_status: str = "ready",
+    summary_text: str = "图片里是一张会议白板，写着周五前确认预算。",
+) -> ChatMessage:
+    now = datetime(2026, 4, 24, 10, 10, 0)
+    return ChatMessage(
+        message_id="m-image",
+        session_id=session_id,
+        sender_id=sender_id,
+        content="/uploads/whiteboard.png",
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.RECEIVED,
+        timestamp=now,
+        updated_at=now,
+        is_self=is_self,
+        extra={
+            "name": "whiteboard.png",
+            "mime_type": "image/png",
+            IMAGE_SUMMARY_EXTRA_KEY: {
+                "status": summary_status,
+                "text": summary_text,
+                "engine": "local_vision",
             },
         },
     )
@@ -356,6 +388,55 @@ def test_ai_memory_indexing_service_deletes_non_ready_voice_transcript() -> None
     asyncio.run(scenario())
 
 
+def test_ai_memory_indexing_service_indexes_ready_image_summary() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        vector_index = _FakeVectorIndex()
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(),
+            vector_index=vector_index,
+            ai_memory_store=store,
+        )
+
+        await service.sync_image_summary_message(_image_message())
+
+        assert len(store.upserted_items) == 1
+        item = store.upserted_items[0]
+        assert item.owner_scope == "account:test1"
+        assert item.source_type == "image_summary"
+        assert item.source_id == "image:session-1:m-image"
+        assert item.title == "whiteboard.png"
+        assert "图片里是一张会议白板" in item.text
+        assert item.embedding_model_id == "fake-embedding-model"
+        assert item.metadata["session_id"] == "session-1"
+        assert item.metadata["message_id"] == "m-image"
+        assert item.metadata["image_name"] == "whiteboard.png"
+        assert item.metadata["summary_status"] == "ready"
+        assert vector_index.calls[0]["title"] == "whiteboard.png"
+        assert "图片消息" in vector_index.calls[0]["keywords"]
+        assert "image/png" in vector_index.calls[0]["keywords"]
+        assert "alice" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_deletes_non_ready_image_summary() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(),
+            vector_index=_FakeVectorIndex(),
+            ai_memory_store=store,
+        )
+
+        await service.sync_image_summary_message(_image_message(summary_status="failed", summary_text=""))
+
+        assert store.upserted_items == []
+        assert store.deleted_sources == [("account:test1", "image_summary", "image:session-1:m-image")]
+
+    asyncio.run(scenario())
+
+
 def test_ai_memory_indexing_service_backfills_ready_local_artifacts() -> None:
     async def scenario() -> None:
         store = _FakeAIMemoryStore()
@@ -363,6 +444,7 @@ def test_ai_memory_indexing_service_backfills_ready_local_artifacts() -> None:
             ready_artifact_messages=[
                 _file_message(),
                 _voice_message(),
+                _image_message(),
             ],
         )
         service = AIMemoryIndexingService(
@@ -374,13 +456,15 @@ def test_ai_memory_indexing_service_backfills_ready_local_artifacts() -> None:
         result = await service.sync_ready_local_artifact_messages(limit=20)
 
         assert db.ready_artifact_calls == [{"limit": 20}]
-        assert result["processed"] == 2
+        assert result["processed"] == 3
         assert result["files"] == 1
         assert result["voices"] == 1
+        assert result["images"] == 1
         source_types = [item.source_type for item in store.upserted_items]
         assert "file_summary" in source_types
         assert "file_text_chunk" in source_types
         assert "voice_transcript" in source_types
+        assert "image_summary" in source_types
 
     asyncio.run(scenario())
 

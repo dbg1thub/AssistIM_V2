@@ -13,6 +13,7 @@ from client.core.file_text_extraction import (
     FILE_TEXT_EXTRACT_MAX_CHARS,
     extracted_file_context_text,
 )
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_vector_index import ConversationVectorIndex
 from client.models.message import ChatMessage, MessageType
@@ -29,6 +30,7 @@ class AIMemoryIndexingService:
     FILE_SUMMARY_SOURCE_TYPE = "file_summary"
     FILE_TEXT_CHUNK_SOURCE_TYPE = "file_text_chunk"
     VOICE_TRANSCRIPT_SOURCE_TYPE = "voice_transcript"
+    IMAGE_SUMMARY_SOURCE_TYPE = "image_summary"
     FILE_TEXT_SNIPPET_CHARS = 2400
     FILE_TEXT_INDEX_MAX_CHARS = FILE_TEXT_EXTRACT_MAX_CHARS
     FILE_TEXT_CHUNK_CHARS = 1200
@@ -254,16 +256,75 @@ class AIMemoryIndexingService:
             )
         )
 
+    async def sync_image_summary_message(self, message: ChatMessage) -> None:
+        """Upsert or delete one image-summary memory item after message extra is persisted."""
+
+        if message.message_type != MessageType.IMAGE:
+            return
+        owner_scope = await self._owner_scope()
+        if not owner_scope:
+            return
+        source_id = self.image_summary_source_id(message)
+        summary = dict((message.extra or {}).get(IMAGE_SUMMARY_EXTRA_KEY) or {})
+        summary_text = _normalize_text(summary.get("text"))
+        if str(summary.get("status") or "").strip() != "ready" or not summary_text:
+            await self._ai_memory_store.delete_source(
+                owner_scope=owner_scope,
+                source_type=self.IMAGE_SUMMARY_SOURCE_TYPE,
+                source_id=source_id,
+            )
+            return
+
+        title = self._image_name(message)
+        memory_text = f"图片摘要：{summary_text}"
+        keywords = self._image_keywords(message, image_name=title)
+        participants = await self._message_participants(message)
+        timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
+        vector = await self._vector_index.encode_item(
+            title=title,
+            text=memory_text,
+            keywords=keywords,
+            participants=participants,
+        )
+        await self._ai_memory_store.upsert_item(
+            AIMemoryItem(
+                owner_scope=owner_scope,
+                source_type=self.IMAGE_SUMMARY_SOURCE_TYPE,
+                source_id=source_id,
+                title=title,
+                text=memory_text,
+                vector=vector.values,
+                embedding_model_id=self._vector_index.model_id,
+                metadata={
+                    "session_id": str(message.session_id or "").strip(),
+                    "message_id": str(message.message_id or "").strip(),
+                    "sender_id": str(message.sender_id or "").strip(),
+                    "is_self": bool(message.is_self),
+                    "image_name": title,
+                    "mime_type": str((message.extra or {}).get("mime_type") or "").strip(),
+                    "summary_status": "ready",
+                    "engine": str(summary.get("engine") or "").strip(),
+                    "model": str(summary.get("model") or "").strip(),
+                    "bucket_start_ts": timestamp,
+                    "bucket_end_ts": timestamp,
+                    "source_version": 1,
+                    "keywords": keywords,
+                    "participants": participants,
+                },
+                updated_at=int(time.time()),
+            )
+        )
+
     async def sync_ready_local_artifact_messages(self, *, limit: int = 500) -> dict[str, int]:
-        """Backfill ready local file/voice AI artifacts into the unified vector memory store."""
+        """Backfill ready local file/voice/image AI artifacts into the unified vector memory store."""
 
         list_messages = getattr(self._db, "list_local_ai_artifact_messages", None)
         if not callable(list_messages):
-            return {"processed": 0, "files": 0, "voices": 0, "failed": 0}
+            return {"processed": 0, "files": 0, "voices": 0, "images": 0, "failed": 0}
 
         normalized_limit = max(1, min(5000, int(limit or 500)))
         messages = list(await list_messages(limit=normalized_limit))
-        stats = {"processed": 0, "files": 0, "voices": 0, "failed": 0}
+        stats = {"processed": 0, "files": 0, "voices": 0, "images": 0, "failed": 0}
         for message in messages:
             try:
                 if message.message_type == MessageType.FILE:
@@ -272,6 +333,9 @@ class AIMemoryIndexingService:
                 elif message.message_type == MessageType.VOICE:
                     await self.sync_voice_transcript_message(message)
                     stats["voices"] += 1
+                elif message.message_type == MessageType.IMAGE:
+                    await self.sync_image_summary_message(message)
+                    stats["images"] += 1
                 else:
                     continue
                 stats["processed"] += 1
@@ -314,6 +378,17 @@ class AIMemoryIndexingService:
                 return value
         content_name = Path(str(message.content or "")).name
         return _normalize_text(content_name) or str(message.message_id or "").strip() or "file"
+
+    @staticmethod
+    def _image_name(message: ChatMessage) -> str:
+        extra = dict(message.extra or {})
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("name", "file_name", "filename", "original_name"):
+            value = _normalize_text(extra.get(key) or media.get(key))
+            if value:
+                return value
+        content_name = Path(str(message.content or "")).name
+        return _normalize_text(content_name) or str(message.message_id or "").strip() or "image"
 
     @staticmethod
     def _file_keywords(message: ChatMessage, *, file_name: str) -> list[str]:
@@ -443,6 +518,21 @@ class AIMemoryIndexingService:
         return keywords
 
     @staticmethod
+    def _image_keywords(message: ChatMessage, *, image_name: str) -> list[str]:
+        keywords: list[str] = []
+
+        def add(value: Any) -> None:
+            normalized = _normalize_text(value)
+            if normalized and normalized not in keywords:
+                keywords.append(normalized)
+
+        add("图片消息")
+        add(image_name)
+        add(Path(image_name).suffix.lower())
+        add(dict(message.extra or {}).get("mime_type"))
+        return keywords
+
+    @staticmethod
     def _voice_duration_seconds(message: ChatMessage, *, transcript: dict[str, Any]) -> int:
         extra = dict(message.extra or {})
         for value in (
@@ -464,6 +554,10 @@ class AIMemoryIndexingService:
     @classmethod
     def voice_transcript_source_id(cls, message: ChatMessage) -> str:
         return f"voice:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
+
+    @classmethod
+    def image_summary_source_id(cls, message: ChatMessage) -> str:
+        return f"image:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
 
 
 def _normalize_text(value: Any) -> str:
