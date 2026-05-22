@@ -39,6 +39,7 @@ RUNTIME_SCHEMA_REQUIRED_TABLES = frozenset(
         "email_verification_codes",
         "user_blocks",
         "moment_privacy_settings",
+        "moment_notifications",
         "user_devices",
         "user_prekeys",
         "user_signed_prekeys",

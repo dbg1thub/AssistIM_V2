@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.moment import MomentCommentCreate, MomentCreate, MomentPrivacySettingsUpdate, MomentUpdate
+from app.schemas.moment import (
+    MomentCommentCreate,
+    MomentCreate,
+    MomentNotificationsRead,
+    MomentPrivacySettingsUpdate,
+    MomentUpdate,
+)
 from app.services.moment_service import MomentService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -132,6 +138,33 @@ async def update_moment_privacy_settings(
         changed=True,
     )
     return success_response(result)
+
+
+@router.get("/notifications")
+def list_moment_notifications(
+    unread_only: bool = Query(default=False),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(
+        MomentService(db).list_notifications(
+            current_user,
+            unread_only=unread_only,
+            page=page,
+            size=size,
+        )
+    )
+
+
+@router.post("/notifications/read")
+def mark_moment_notifications_read(
+    payload: MomentNotificationsRead,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(MomentService(db).mark_notifications_read(current_user, payload.notification_ids))
 
 
 @router.get("/{moment_id}")

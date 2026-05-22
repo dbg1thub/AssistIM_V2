@@ -255,14 +255,58 @@ class MomentService:
         return {"liked": False, "changed": changed}
 
     def comment(self, current_user: User, moment_id: str, content: str, image: object | None = None) -> dict:
-        self._get_visible_moment(current_user, moment_id)
+        moment = self._get_visible_moment(current_user, moment_id)
         comment = self.moments.comment(
             moment_id,
             current_user.id,
             content,
             image_json=self._dump_image_item(image),
         )
+        self._create_comment_notifications(current_user, moment, comment)
         return self.serialize_comment(comment, current_user)
+
+    def list_notifications(
+        self,
+        current_user: User,
+        *,
+        unread_only: bool = False,
+        page: int = 1,
+        size: int = 50,
+    ) -> dict:
+        normalized_page = max(1, int(page or 1))
+        normalized_size = min(100, max(1, int(size or 50)))
+        notifications = self.moments.list_notifications(
+            current_user.id,
+            unread_only=unread_only,
+            offset=(normalized_page - 1) * normalized_size,
+            limit=normalized_size,
+        )
+        actor_ids = [str(item.actor_user_id or "") for item in notifications]
+        moment_ids = [str(item.moment_id or "") for item in notifications]
+        users_map = self.moments.get_users_map(actor_ids)
+        moments_map = self.moments.get_moments_map(moment_ids)
+        return {
+            "unread_count": self.moments.count_unread_notifications(current_user.id),
+            "items": [
+                self.serialize_notification(
+                    item,
+                    actor=users_map.get(str(item.actor_user_id or "")),
+                    moment=moments_map.get(str(item.moment_id or "")),
+                )
+                for item in notifications
+            ],
+        }
+
+    def mark_notifications_read(self, current_user: User, notification_ids: list[str] | None = None) -> dict:
+        read_count = self.moments.mark_notifications_read(
+            current_user.id,
+            notification_ids=self._normalize_user_id_list(notification_ids or []),
+            read_at=datetime.now(timezone.utc),
+        )
+        return {
+            "read_count": read_count,
+            "unread_count": self.moments.count_unread_notifications(current_user.id),
+        }
 
     def delete_moment(self, current_user: User, moment_id: str) -> dict:
         moment = self.moments.get_by_id(moment_id)
@@ -453,6 +497,99 @@ class MomentService:
             "created_at": comment.created_at.isoformat() if comment.created_at else None,
             "author": self.user_payloads.serialize_public_user(user) if user else None,
         }
+
+    def serialize_notification(self, notification, *, actor: User | None = None, moment=None) -> dict:
+        return {
+            "id": notification.id,
+            "type": notification.notification_type,
+            "recipient_user_id": notification.recipient_user_id,
+            "actor_user_id": notification.actor_user_id,
+            "moment_id": notification.moment_id,
+            "comment_id": notification.comment_id,
+            "content_preview": notification.content_preview,
+            "created_at": notification.created_at.isoformat() if notification.created_at else None,
+            "read_at": notification.read_at.isoformat() if notification.read_at else None,
+            "actor": self.user_payloads.serialize_public_user(actor) if actor else None,
+            "moment": {
+                "id": moment.id,
+                "user_id": moment.user_id,
+                "content": moment.content,
+                "created_at": moment.created_at.isoformat() if moment.created_at else None,
+            }
+            if moment is not None
+            else None,
+        }
+
+    def _create_comment_notifications(self, current_user: User, moment, comment) -> None:
+        actor_user_id = str(current_user.id or "")
+        moment_owner_user_id = str(getattr(moment, "user_id", "") or "")
+        comment_id = str(getattr(comment, "id", "") or "")
+        moment_id = str(getattr(moment, "id", "") or "")
+        content_preview = str(getattr(comment, "content", "") or "").strip()[:160]
+        notified_user_ids: set[str] = set()
+
+        if moment_owner_user_id and moment_owner_user_id != actor_user_id:
+            self.moments.create_notification(
+                recipient_user_id=moment_owner_user_id,
+                actor_user_id=actor_user_id,
+                moment_id=moment_id,
+                comment_id=comment_id,
+                notification_type="commented_mine",
+                content_preview=content_preview,
+            )
+            notified_user_ids.add(moment_owner_user_id)
+
+        for recipient in self._mentioned_visible_users(current_user, moment, str(getattr(comment, "content", "") or "")):
+            recipient_user_id = str(recipient.id or "")
+            if not recipient_user_id or recipient_user_id == actor_user_id or recipient_user_id in notified_user_ids:
+                continue
+            self.moments.create_notification(
+                recipient_user_id=recipient_user_id,
+                actor_user_id=actor_user_id,
+                moment_id=moment_id,
+                comment_id=comment_id,
+                notification_type="mentioned_me",
+                content_preview=content_preview,
+            )
+            notified_user_ids.add(recipient_user_id)
+
+    def _mentioned_visible_users(self, current_user: User, moment, content: str) -> list[User]:
+        normalized_content = str(content or "").casefold()
+        if "@" not in normalized_content:
+            return []
+        owner_user_id = str(getattr(moment, "user_id", "") or "")
+        candidate_user_ids = [owner_user_id]
+        candidate_user_ids.extend(str(friend.friend_id or "") for friend in self.friends.list_friends(owner_user_id))
+        users_map = self.moments.get_users_map(candidate_user_ids)
+        settings_map = self.moments.get_privacy_settings_map([*candidate_user_ids, owner_user_id])
+        mentioned_users: list[User] = []
+        for user_id, user in users_map.items():
+            if user_id == current_user.id:
+                continue
+            if not self._can_view_moment(user, moment, settings_map=settings_map):
+                continue
+            if self._comment_mentions_user(normalized_content, user):
+                mentioned_users.append(user)
+        return mentioned_users
+
+    @staticmethod
+    def _comment_mentions_user(normalized_content: str, user: User) -> bool:
+        names = [
+            str(getattr(user, "username", "") or "").strip().casefold(),
+            str(getattr(user, "nickname", "") or "").strip().casefold(),
+        ]
+        return any(name and MomentService._contains_mention(normalized_content, name) for name in names)
+
+    @staticmethod
+    def _contains_mention(normalized_content: str, normalized_name: str) -> bool:
+        marker = f"@{normalized_name}"
+        start = normalized_content.find(marker)
+        while start >= 0:
+            end = start + len(marker)
+            if end >= len(normalized_content) or normalized_content[end].isspace() or normalized_content[end] in ",.;:!?，。；：！？)]}":
+                return True
+            start = normalized_content.find(marker, start + 1)
+        return False
 
     @classmethod
     def _dump_media_items(cls, media: list | None) -> str:

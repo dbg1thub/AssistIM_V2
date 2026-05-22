@@ -551,6 +551,19 @@ def test_discovery_ui_wires_moment_edit_actions() -> None:
     assert 'self.media_preview.set_media(list(moment.media))' in discovery_interface
 
 
+def test_discovery_ui_wires_moment_notification_entry() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'class MomentNotificationDialog(FluentDialog):' in discovery_interface
+    assert 'self.notifications_button = PushButton(' in discovery_interface
+    assert 'self.notifications_button.clicked.connect(self._open_notifications_dialog)' in discovery_interface
+    assert 'await self._controller.load_moment_notifications(' in discovery_interface
+    assert 'await self._controller.mark_moment_notifications_read(' in discovery_interface
+    assert 'self._sync_moment_notification_badge(' in discovery_interface
+    assert 'open_moment_requested = Signal(str)' in discovery_interface
+    assert 'dialog.open_moment_requested.connect(self._open_notification_moment)' in discovery_interface
+
+
 def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

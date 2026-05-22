@@ -59,6 +59,8 @@ from client.services.file_service import get_file_service
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
     MomentMediaRecord,
+    MomentNotificationInbox,
+    MomentNotificationRecord,
     MomentPrivacySettings,
     MomentRecord,
     get_discovery_controller,
@@ -1155,6 +1157,88 @@ class MomentPrivacySettingsDialog(FluentDialog):
         self.accept()
 
 
+class MomentNotificationDialog(FluentDialog):
+    """List moment interaction notifications."""
+
+    mark_read_requested = Signal(list)
+    open_moment_requested = Signal(str)
+
+    def __init__(self, inbox: MomentNotificationInbox, parent=None):
+        super().__init__(parent, title=tr("discovery.notifications.window_title", "Moment Notifications"))
+        self._inbox = inbox
+        self.setWindowTitle(tr("discovery.notifications.window_title", "Moment Notifications"))
+        self.setModal(False)
+        self.resize(560, 520)
+        self.setObjectName("MomentNotificationDialog")
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = self.content_layout
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(14)
+        layout.addWidget(TitleLabel(tr("discovery.notifications.title", "Moment Notifications"), self))
+
+        if not self._inbox.items:
+            empty = BodyLabel(tr("discovery.notifications.empty", "No moment notifications yet."), self)
+            empty.setWordWrap(True)
+            layout.addWidget(empty, 1)
+        else:
+            for item in self._inbox.items:
+                layout.addWidget(self._create_notification_item(item))
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.addStretch(1)
+        unread_ids = [item.id for item in self._inbox.items if item.is_unread]
+        self.mark_read_button = PrimaryPushButton(tr("discovery.notifications.mark_read", "Mark all read"), self)
+        self.mark_read_button.setEnabled(bool(unread_ids))
+        self.mark_read_button.clicked.connect(lambda _checked=False, ids=unread_ids: self._mark_read(ids))
+        close_button = PushButton(tr("common.close", "Close"), self)
+        close_button.clicked.connect(self.accept)
+        footer.addWidget(self.mark_read_button)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+
+    def _create_notification_item(self, item: MomentNotificationRecord) -> QWidget:
+        card = CardWidget(self)
+        card.setBorderRadius(8)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(6)
+        title = BodyLabel(self._notification_title(item), card)
+        title.setWordWrap(True)
+        preview = CaptionLabel(item.content_preview or item.moment_content, card)
+        preview.setWordWrap(True)
+        time_label = CaptionLabel(format_relative_time(item.created_at), card)
+        card_layout.addWidget(title)
+        if preview.text():
+            card_layout.addWidget(preview)
+        card_layout.addWidget(time_label)
+        if item.moment_id:
+            open_button = PushButton(tr("discovery.notifications.view_moment", "View moment"), card)
+            open_button.clicked.connect(lambda _checked=False, moment_id=item.moment_id: self._open_moment(moment_id))
+            card_layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignLeft)
+        return card
+
+    def _notification_title(self, item: MomentNotificationRecord) -> str:
+        actor = item.actor_display_name
+        if item.notification_type == "mentioned_me":
+            return tr("discovery.notifications.mentioned_me", "{actor} mentioned you in a moment comment.", actor=actor)
+        return tr("discovery.notifications.commented_mine", "{actor} commented on your moment.", actor=actor)
+
+    def _mark_read(self, notification_ids: list[str]) -> None:
+        if not notification_ids:
+            return
+        self.mark_read_requested.emit(notification_ids)
+        self.accept()
+
+    def _open_moment(self, moment_id: str) -> None:
+        if not moment_id:
+            return
+        self.open_moment_requested.emit(moment_id)
+        self.accept()
+
+
 class CreateMomentDialog(FluentDialog):
     """Dialog for publishing a moment with text, images, or video."""
 
@@ -1815,10 +1899,12 @@ class DiscoveryInterface(QWidget):
         self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
         _apply_safe_button_font(self.refresh_button)
         self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)
+        self.notifications_button = PushButton(tr("discovery.notifications.button", "Notifications"), self.hero_card)
         self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.hero_card)
 
         top_row.addLayout(title_stack, 1)
         top_row.addWidget(self.refresh_button, 0)
+        top_row.addWidget(self.notifications_button, 0)
         top_row.addWidget(self.privacy_button, 0)
         top_row.addWidget(self.publish_button, 0)
 
@@ -1848,6 +1934,7 @@ class DiscoveryInterface(QWidget):
     def _connect_signals(self) -> None:
         self.refresh_button.clicked.connect(self.reload_data)
         self.privacy_button.clicked.connect(self._open_privacy_settings_dialog)
+        self.notifications_button.clicked.connect(self._open_notifications_dialog)
         self.publish_button.clicked.connect(self._open_publish_dialog)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
 
@@ -1855,6 +1942,7 @@ class DiscoveryInterface(QWidget):
         """Refresh the feed from the backend."""
         if self._teardown_started:
             return
+        self._create_ui_task(self._refresh_moment_notification_badge(), "refresh moment notification badge")
         self._set_load_task(self._reload_data_async())
 
     def _on_moment_sync_required(self, payload: object) -> None:
@@ -1959,6 +2047,50 @@ class DiscoveryInterface(QWidget):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _open_notifications_dialog(self) -> None:
+        self._create_ui_task(self._open_notifications_dialog_async(), "open moment notifications dialog")
+
+    async def _open_notifications_dialog_async(self) -> None:
+        inbox = await self._controller.load_moment_notifications()
+        self._sync_moment_notification_badge(inbox.unread_count)
+        dialog = MomentNotificationDialog(inbox, self.window())
+        dialog.mark_read_requested.connect(self._mark_moment_notifications_read)
+        dialog.open_moment_requested.connect(self._open_notification_moment)
+        self._dialog_refs.add(dialog)
+        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    async def _refresh_moment_notification_badge(self) -> None:
+        inbox = await self._controller.load_moment_notifications(unread_only=True)
+        self._sync_moment_notification_badge(inbox.unread_count)
+
+    def _sync_moment_notification_badge(self, unread_count: int) -> None:
+        count = max(0, int(unread_count or 0))
+        if count:
+            self.notifications_button.setText(
+                tr("discovery.notifications.button_with_count", "Notifications ({count})", count=count)
+            )
+            return
+        self.notifications_button.setText(tr("discovery.notifications.button", "Notifications"))
+
+    def _mark_moment_notifications_read(self, notification_ids: list) -> None:
+        self._create_ui_task(
+            self._mark_moment_notifications_read_async([str(item) for item in notification_ids]),
+            "mark moment notifications read",
+        )
+
+    async def _mark_moment_notifications_read_async(self, notification_ids: list[str]) -> None:
+        result = await self._controller.mark_moment_notifications_read(notification_ids)
+        self._sync_moment_notification_badge(int(result.get("unread_count", 0) or 0))
+
+    def _open_notification_moment(self, moment_id: str) -> None:
+        if not moment_id:
+            return
+        self._request_moment_detail(moment_id)
 
     def _create_moment(self, content: str, media_paths: list | None = None, visibility_scope: str = "public", visibility_user_ids: list | None = None) -> None:
         if self._teardown_started:

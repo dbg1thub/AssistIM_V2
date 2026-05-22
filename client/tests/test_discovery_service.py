@@ -200,6 +200,30 @@ def test_discovery_service_fetches_and_updates_moment_privacy_settings(monkeypat
     asyncio.run(scenario())
 
 
+def test_discovery_service_fetches_and_marks_moment_notifications_read(monkeypatch) -> None:
+    fake_http = FakeHttpClient(
+        {
+            "unread_count": 1,
+            "items": [{"id": "notice-1", "type": "commented_mine"}],
+        }
+    )
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+        payload = await service.fetch_moment_notifications(unread_only=True)
+        read_payload = await service.mark_moment_notifications_read(["notice-1"])
+
+        assert fake_http.get_calls == [("/moments/notifications", {"unread_only": True})]
+        assert fake_http.post_calls == [
+            ("/moments/notifications/read", {"notification_ids": ["notice-1"]})
+        ]
+        assert payload["unread_count"] == 1
+        assert read_payload["unread_count"] == 1
+
+    asyncio.run(scenario())
+
+
 def test_discovery_service_add_comment_posts_optional_image(monkeypatch) -> None:
     fake_http = FakeHttpClient({"id": "comment-1", "content": "nice"})
     monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)

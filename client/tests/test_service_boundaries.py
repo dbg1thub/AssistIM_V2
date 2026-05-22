@@ -1099,6 +1099,8 @@ class FakeDiscoveryService:
         self.update_moment_calls: list[tuple[str, str, str, list[str]]] = []
         self.fetch_privacy_settings_calls = 0
         self.update_privacy_settings_calls: list[dict] = []
+        self.fetch_notification_calls: list[bool] = []
+        self.mark_notifications_read_calls: list[list[str]] = []
         self.like_calls: list[str] = []
         self.unlike_calls: list[str] = []
         self.comment_calls: list[tuple[str, str, dict | None]] = []
@@ -1112,6 +1114,10 @@ class FakeDiscoveryService:
             'hide_my_moments_user_ids': [],
             'hide_their_moments_user_ids': [],
             'visible_time_scope': 'all',
+        }
+        self.notifications_payload: dict = {
+            'unread_count': 0,
+            'items': [],
         }
 
     async def fetch_moments(self, *, user_id: str | None = None) -> list[dict]:
@@ -1188,6 +1194,15 @@ class FakeDiscoveryService:
             'visible_time_scope': payload['visible_time_scope'] or 'all',
         }
         return dict(self.privacy_settings_payload)
+
+    async def fetch_moment_notifications(self, *, unread_only: bool = False) -> dict:
+        self.fetch_notification_calls.append(bool(unread_only))
+        return dict(self.notifications_payload)
+
+    async def mark_moment_notifications_read(self, notification_ids: list[str] | None = None) -> dict:
+        normalized_ids = [str(item) for item in (notification_ids or [])]
+        self.mark_notifications_read_calls.append(normalized_ids)
+        return {'read_count': len(normalized_ids), 'unread_count': 0}
 
     async def like_moment(self, moment_id: str) -> None:
         self.like_calls.append(moment_id)
@@ -3399,6 +3414,50 @@ def test_discovery_controller_round_trips_moment_privacy_settings(monkeypatch) -
             }
         ]
         assert updated.visible_time_scope == 'three_days'
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_round_trips_moment_notifications(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice'})
+    fake_discovery_service.notifications_payload = {
+        'unread_count': 1,
+        'items': [
+            {
+                'id': 'notice-1',
+                'type': 'mentioned_me',
+                'recipient_user_id': 'user-1',
+                'actor_user_id': 'user-2',
+                'moment_id': 'moment-1',
+                'comment_id': 'comment-1',
+                'content_preview': 'hello @alice',
+                'created_at': '2026-05-16T11:00:00Z',
+                'read_at': None,
+                'actor': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+                'moment': {'id': 'moment-1', 'content': 'source'},
+            }
+        ],
+    }
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+        result = await controller.load_moment_notifications(unread_only=True)
+        read_result = await controller.mark_moment_notifications_read(['notice-1'])
+
+        assert fake_discovery_service.fetch_notification_calls == [True]
+        assert fake_discovery_service.mark_notifications_read_calls == [['notice-1']]
+        assert result.unread_count == 1
+        assert result.items[0].id == 'notice-1'
+        assert result.items[0].notification_type == 'mentioned_me'
+        assert result.items[0].actor_display_name == 'Bob'
+        assert result.items[0].moment_content == 'source'
+        assert read_result['read_count'] == 1
 
     asyncio.run(scenario())
 

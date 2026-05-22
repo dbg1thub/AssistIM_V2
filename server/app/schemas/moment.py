@@ -13,6 +13,7 @@ MAX_MOMENT_CONTENT_LENGTH = 2_000
 MAX_MOMENT_COMMENT_LENGTH = 1_000
 MAX_MOMENT_MEDIA_ITEMS = 9
 MAX_MOMENT_VISIBILITY_USER_IDS = 500
+MAX_MOMENT_NOTIFICATION_IDS = 100
 
 MomentVisibilityScope = Literal["public", "private", "include", "exclude"]
 MomentVisibleTimeScope = Literal["all", "half_year", "month", "three_days"]
@@ -127,6 +128,21 @@ class MomentPrivacySettingsOut(ORMModel):
     hide_my_moments_user_ids: list[str] = Field(default_factory=list)
     hide_their_moments_user_ids: list[str] = Field(default_factory=list)
     visible_time_scope: MomentVisibleTimeScope = "all"
+
+
+class MomentNotificationsRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notification_ids: list[str] = Field(default_factory=list, max_length=MAX_MOMENT_NOTIFICATION_IDS)
+
+    @field_validator("notification_ids", mode="before")
+    @classmethod
+    def _normalize_notification_ids(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("notification_ids must be a list")
+        return _normalize_user_id_list(value)
 
 
 class MomentCommentCreate(BaseModel):

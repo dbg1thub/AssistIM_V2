@@ -7,7 +7,7 @@ from collections import defaultdict
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.orm import Session
 
-from app.models.moment import Moment, MomentComment, MomentLike, MomentPrivacySetting
+from app.models.moment import Moment, MomentComment, MomentLike, MomentNotification, MomentPrivacySetting
 from app.models.user import User
 
 
@@ -155,6 +155,13 @@ class MomentRepository:
     def get_by_id(self, moment_id: str) -> Moment | None:
         return self.db.get(Moment, moment_id)
 
+    def get_moments_map(self, moment_ids: list[str]) -> dict[str, Moment]:
+        normalized_ids = [item for item in dict.fromkeys(moment_ids) if item]
+        if not normalized_ids:
+            return {}
+        stmt = select(Moment).where(Moment.id.in_(normalized_ids))
+        return {str(moment.id): moment for moment in self.db.execute(stmt).scalars().all()}
+
     def update_moment(
         self,
         moment: Moment,
@@ -196,6 +203,108 @@ class MomentRepository:
         self.db.commit()
         self.db.refresh(comment)
         return comment
+
+    def create_notification(
+        self,
+        *,
+        recipient_user_id: str,
+        actor_user_id: str,
+        moment_id: str,
+        comment_id: str,
+        notification_type: str,
+        content_preview: str,
+    ) -> MomentNotification | None:
+        existing = self.get_existing_notification(
+            recipient_user_id=recipient_user_id,
+            actor_user_id=actor_user_id,
+            moment_id=moment_id,
+            comment_id=comment_id,
+            notification_type=notification_type,
+        )
+        if existing is not None:
+            return None
+        notification = MomentNotification(
+            recipient_user_id=recipient_user_id,
+            actor_user_id=actor_user_id,
+            moment_id=moment_id,
+            comment_id=comment_id,
+            notification_type=notification_type,
+            content_preview=content_preview,
+        )
+        self.db.add(notification)
+        self.db.commit()
+        self.db.refresh(notification)
+        return notification
+
+    def get_existing_notification(
+        self,
+        *,
+        recipient_user_id: str,
+        actor_user_id: str,
+        moment_id: str,
+        comment_id: str,
+        notification_type: str,
+    ) -> MomentNotification | None:
+        stmt = select(MomentNotification).where(
+            MomentNotification.recipient_user_id == recipient_user_id,
+            MomentNotification.actor_user_id == actor_user_id,
+            MomentNotification.moment_id == moment_id,
+            MomentNotification.comment_id == comment_id,
+            MomentNotification.notification_type == notification_type,
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_notifications(
+        self,
+        recipient_user_id: str,
+        *,
+        unread_only: bool = False,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[MomentNotification]:
+        stmt = select(MomentNotification).where(MomentNotification.recipient_user_id == recipient_user_id)
+        if unread_only:
+            stmt = stmt.where(MomentNotification.read_at.is_(None))
+        stmt = stmt.order_by(desc(MomentNotification.created_at)).offset(max(0, offset)).limit(max(0, limit))
+        return list(self.db.execute(stmt).scalars().all())
+
+    def count_unread_notifications(self, recipient_user_id: str) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(MomentNotification)
+            .where(
+                MomentNotification.recipient_user_id == recipient_user_id,
+                MomentNotification.read_at.is_(None),
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one() or 0)
+
+    def mark_notifications_read(
+        self,
+        recipient_user_id: str,
+        *,
+        notification_ids: list[str],
+        read_at,
+    ) -> int:
+        normalized_ids = [item for item in dict.fromkeys(notification_ids) if item]
+        if not normalized_ids:
+            return 0
+        notifications = list(
+            self.db.execute(
+                select(MomentNotification).where(
+                    MomentNotification.recipient_user_id == recipient_user_id,
+                    MomentNotification.id.in_(normalized_ids),
+                    MomentNotification.read_at.is_(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for notification in notifications:
+            notification.read_at = read_at
+            self.db.add(notification)
+        self.db.commit()
+        return len(notifications)
 
     def delete_moment(self, moment: Moment) -> None:
         moment_id = str(moment.id or "")

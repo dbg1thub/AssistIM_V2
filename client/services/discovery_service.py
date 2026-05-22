@@ -105,6 +105,25 @@ class DiscoveryService:
         payload = await self._http.patch("/moments/privacy", json=body)
         return dict(payload or {})
 
+    async def fetch_moment_notifications(self, *, unread_only: bool = False) -> dict[str, Any]:
+        """Fetch the current user's moment interaction notifications."""
+        payload = await self._http.get(
+            "/moments/notifications",
+            params={"unread_only": True} if unread_only else None,
+        )
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected moment notifications payload: %r", payload)
+            return {"unread_count": 0, "items": []}
+        return dict(payload)
+
+    async def mark_moment_notifications_read(self, notification_ids: list[str] | None = None) -> dict[str, Any]:
+        """Mark selected moment notifications read."""
+        payload = await self._http.post(
+            "/moments/notifications/read",
+            json={"notification_ids": list(notification_ids or [])},
+        )
+        return dict(payload or {})
+
     async def like_moment(self, moment_id: str) -> None:
         """Like one moment."""
         await self._http.post(f"/moments/{moment_id}/likes", json={})

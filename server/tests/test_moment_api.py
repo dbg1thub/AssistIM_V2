@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.v1 import moments as moment_routes
 from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
-from app.models.moment import Moment, MomentComment, MomentLike
+from app.models.moment import Moment, MomentComment, MomentLike, MomentNotification
 from app.schemas.moment import MAX_MOMENT_COMMENT_LENGTH, MAX_MOMENT_CONTENT_LENGTH, MAX_MOMENT_MEDIA_ITEMS
 
 
@@ -217,6 +217,105 @@ def test_moment_owner_can_update_text_visibility_and_broadcast_refresh(
     assert refresh_payload["data"]["moment_id"] == moment_id
     assert refresh_payload["data"]["actor_user_id"] == alice["user"]["id"]
     assert refresh_payload["data"]["owner_user_id"] == alice["user"]["id"]
+
+
+def test_moment_comment_creates_comment_and_mention_notifications(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_notice_alice", "Alice Mention")
+    bob = user_factory("moment_notice_bob", "Bob Mention")
+    charlie = user_factory("moment_notice_charlie", "Charlie Mention")
+    _make_friends(client, auth_header, alice, bob)
+    _make_friends(client, auth_header, alice, charlie)
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "notification source"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+
+    comment_response = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "ping @Charlie Mention"},
+        headers=bob_headers,
+    )
+    assert comment_response.status_code == 200
+    comment_id = comment_response.json()["data"]["id"]
+
+    alice_notifications = client.get("/api/v1/moments/notifications", headers=alice_headers)
+    assert alice_notifications.status_code == 200
+    alice_payload = alice_notifications.json()["data"]
+    assert alice_payload["unread_count"] == 1
+    assert alice_payload["items"][0]["type"] == "commented_mine"
+    assert alice_payload["items"][0]["moment_id"] == moment_id
+    assert alice_payload["items"][0]["comment_id"] == comment_id
+    assert alice_payload["items"][0]["actor"]["id"] == bob["user"]["id"]
+    assert alice_payload["items"][0]["moment"]["content"] == "notification source"
+
+    charlie_notifications = client.get("/api/v1/moments/notifications", headers=charlie_headers)
+    assert charlie_notifications.status_code == 200
+    charlie_payload = charlie_notifications.json()["data"]
+    assert charlie_payload["unread_count"] == 1
+    assert charlie_payload["items"][0]["type"] == "mentioned_me"
+    assert charlie_payload["items"][0]["recipient_user_id"] == charlie["user"]["id"]
+
+    bob_notifications = client.get("/api/v1/moments/notifications", headers=bob_headers)
+    assert bob_notifications.status_code == 200
+    assert bob_notifications.json()["data"]["items"] == []
+
+    with SessionLocal() as db:
+        notifications = db.query(MomentNotification).all()
+        assert sorted(item.notification_type for item in notifications) == ["commented_mine", "mentioned_me"]
+
+
+def test_moment_notifications_can_be_marked_read(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_notice_read_alice", "Notice Read Alice")
+    bob = user_factory("moment_notice_read_bob", "Notice Read Bob")
+    _make_friends(client, auth_header, alice, bob)
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "read source"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+    assert client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "mark read"},
+        headers=bob_headers,
+    ).status_code == 200
+
+    unread_response = client.get("/api/v1/moments/notifications", headers=alice_headers)
+    assert unread_response.status_code == 200
+    notification_id = unread_response.json()["data"]["items"][0]["id"]
+
+    read_response = client.post(
+        "/api/v1/moments/notifications/read",
+        json={"notification_ids": [notification_id]},
+        headers=alice_headers,
+    )
+    assert read_response.status_code == 200
+    assert read_response.json()["data"]["read_count"] == 1
+
+    refreshed_response = client.get("/api/v1/moments/notifications", headers=alice_headers)
+    assert refreshed_response.status_code == 200
+    refreshed_payload = refreshed_response.json()["data"]
+    assert refreshed_payload["unread_count"] == 0
+    assert refreshed_payload["items"][0]["read_at"]
 
 
 def test_moment_owner_can_delete_moment_and_cascade_interactions(

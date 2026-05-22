@@ -99,6 +99,41 @@ class MomentPrivacySettings:
     visible_time_scope: str = "all"
 
 
+@dataclass
+class MomentNotificationRecord:
+    """Normalized moment interaction notification."""
+
+    id: str
+    notification_type: str
+    recipient_user_id: str
+    actor_user_id: str
+    moment_id: str
+    comment_id: str
+    content_preview: str = ""
+    created_at: str = ""
+    read_at: str = ""
+    actor_username: str = ""
+    actor_nickname: str = ""
+    moment_content: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def actor_display_name(self) -> str:
+        return self.actor_nickname or self.actor_username or self.actor_user_id or "Unknown User"
+
+    @property
+    def is_unread(self) -> bool:
+        return not bool(self.read_at)
+
+
+@dataclass
+class MomentNotificationInbox:
+    """Normalized moment notification inbox payload."""
+
+    unread_count: int = 0
+    items: list[MomentNotificationRecord] = field(default_factory=list)
+
+
 class DiscoveryController:
     """Provide discovery timeline data to the UI."""
 
@@ -268,6 +303,24 @@ class DiscoveryController:
         )
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_privacy_settings(payload)
+
+    async def load_moment_notifications(self, *, unread_only: bool = False) -> MomentNotificationInbox:
+        """Load the current user's moment interaction notifications."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.fetch_moment_notifications(unread_only=unread_only)
+        self._ensure_runtime_user_id(owner_user_id)
+        return self._normalize_notification_inbox(payload)
+
+    async def mark_moment_notifications_read(self, notification_ids: list[str] | None = None) -> dict[str, Any]:
+        """Mark selected moment interaction notifications read."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.mark_moment_notifications_read(
+            self._normalize_user_id_list(notification_ids)
+        )
+        self._ensure_runtime_user_id(owner_user_id)
+        return dict(payload or {})
 
     async def set_liked(self, moment_id: str, liked: bool, like_count: Optional[int] = None) -> bool:
         """Update like state for a moment."""
@@ -440,6 +493,37 @@ class DiscoveryController:
             hide_my_moments_user_ids=self._normalize_user_id_list(data.get("hide_my_moments_user_ids")),
             hide_their_moments_user_ids=self._normalize_user_id_list(data.get("hide_their_moments_user_ids")),
             visible_time_scope=self._normalize_visible_time_scope(data.get("visible_time_scope")),
+        )
+
+    def _normalize_notification_inbox(self, payload: dict[str, Any]) -> MomentNotificationInbox:
+        data = dict(payload or {})
+        return MomentNotificationInbox(
+            unread_count=max(0, int(data.get("unread_count", 0) or 0)),
+            items=[
+                self._normalize_notification(item)
+                for item in list(data.get("items") or [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    def _normalize_notification(self, payload: dict[str, Any]) -> MomentNotificationRecord:
+        data = dict(payload or {})
+        actor = dict(data.get("actor") or {})
+        moment = dict(data.get("moment") or {})
+        return MomentNotificationRecord(
+            id=str(data.get("id", "") or ""),
+            notification_type=str(data.get("type", "") or data.get("notification_type", "") or ""),
+            recipient_user_id=str(data.get("recipient_user_id", "") or ""),
+            actor_user_id=str(data.get("actor_user_id", "") or actor.get("id", "") or ""),
+            moment_id=str(data.get("moment_id", "") or moment.get("id", "") or ""),
+            comment_id=str(data.get("comment_id", "") or ""),
+            content_preview=str(data.get("content_preview", "") or ""),
+            created_at=str(data.get("created_at", "") or ""),
+            read_at=str(data.get("read_at", "") or ""),
+            actor_username=str(actor.get("username", "") or ""),
+            actor_nickname=str(actor.get("nickname", "") or ""),
+            moment_content=str(moment.get("content", "") or ""),
+            extra=data,
         )
 
     def _normalize_media_items(self, payload: object) -> list[MomentMediaRecord]:
