@@ -283,6 +283,16 @@ class DeviceSecurityDialog(FluentDialog):
 
         self.status_label = CaptionLabel("", self)
         self.status_label.setWordWrap(True)
+        self.recovery_status_title = CaptionLabel(
+            tr("profile.security.recovery.title", "History Recovery"),
+            self,
+        )
+        self.recovery_summary_label = BodyLabel("", self)
+        self.recovery_summary_label.setWordWrap(True)
+        self.recovery_source_container = QWidget(self)
+        self.recovery_source_layout = QVBoxLayout(self.recovery_source_container)
+        self.recovery_source_layout.setContentsMargins(0, 0, 0, 0)
+        self.recovery_source_layout.setSpacing(8)
 
         self.scroll_area = SingleDirectionScrollArea(self, orient=Qt.Orientation.Vertical)
         self.scroll_area.setObjectName("DeviceSecurityScrollArea")
@@ -312,6 +322,9 @@ class DeviceSecurityDialog(FluentDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.recovery_status_title)
+        layout.addWidget(self.recovery_summary_label)
+        layout.addWidget(self.recovery_source_container)
         layout.addWidget(self.scroll_area, 1)
         layout.addLayout(button_row)
 
@@ -350,6 +363,7 @@ class DeviceSecurityDialog(FluentDialog):
             self._render_empty(tr("profile.security.load_failed_hint", "Try refreshing again later."))
         else:
             local_device_id = str(diagnostics.get("local_device_id", "") or "").strip()
+            self._render_history_recovery_diagnostics(diagnostics)
             self._render_devices(devices, local_device_id=local_device_id)
             self.status_label.setText(
                 tr(
@@ -414,8 +428,17 @@ class DeviceSecurityDialog(FluentDialog):
             if widget is not None:
                 widget.deleteLater()
 
+    def _clear_recovery_source_layout(self) -> None:
+        while self.recovery_source_layout.count():
+            item = self.recovery_source_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
     def _render_loading(self) -> None:
         self._render_empty(tr("profile.security.loading", "Loading registered devices..."))
+        self.recovery_summary_label.setText("")
+        self._clear_recovery_source_layout()
 
     def _render_empty(self, text: str) -> None:
         self._clear_device_layout()
@@ -423,6 +446,117 @@ class DeviceSecurityDialog(FluentDialog):
         label.setWordWrap(True)
         self.device_layout.addWidget(label)
         self.device_layout.addStretch(1)
+
+    def _render_history_recovery_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        source_devices = [dict(item) for item in list(diagnostics.get("source_devices") or []) if isinstance(item, dict)]
+        primary_source_device_id = str(diagnostics.get("primary_source_device_id") or "").strip()
+        signed_prekey_count = int(diagnostics.get("signed_prekey_count", 0) or 0)
+        one_time_prekey_count = int(diagnostics.get("one_time_prekey_count", 0) or 0)
+        group_session_count = int(diagnostics.get("group_session_count", 0) or 0)
+        group_sender_key_count = int(diagnostics.get("group_sender_key_count", 0) or 0)
+        source_device_count = int(diagnostics.get("source_device_count", 0) or 0)
+        last_imported_at = str(diagnostics.get("last_imported_at") or "").strip()
+
+        if not bool(diagnostics.get("available")):
+            self.recovery_summary_label.setText(
+                tr(
+                    "profile.security.recovery.empty",
+                    "No imported history recovery package is available on this device.",
+                )
+            )
+            self._clear_recovery_source_layout()
+            return
+
+        self.recovery_summary_label.setText(
+            tr(
+                "profile.security.recovery.summary",
+                "{sources} source devices · {signed} signed prekeys · {one_time} one-time prekeys · {groups} group sessions · {sender_keys} sender keys · last import {last_imported}",
+                sources=source_device_count,
+                signed=signed_prekey_count,
+                one_time=one_time_prekey_count,
+                groups=group_session_count,
+                sender_keys=group_sender_key_count,
+                last_imported=last_imported_at or tr("common.unknown", "Unknown"),
+            )
+        )
+        self._clear_recovery_source_layout()
+        if not source_devices:
+            return
+        for source in source_devices:
+            source_device_id = str(source.get("source_device_id") or "").strip()
+            self.recovery_source_layout.addWidget(
+                self._create_recovery_source_card(
+                    source,
+                    is_primary=bool(primary_source_device_id and source_device_id == primary_source_device_id),
+                )
+            )
+
+    def _create_recovery_source_card(self, source: dict[str, Any], *, is_primary: bool) -> QWidget:
+        card = QWidget(self.recovery_source_container)
+        card.setObjectName("DeviceSecurityRecoverySourceCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            "QWidget#DeviceSecurityRecoverySourceCard {"
+            f"background: {'rgba(255,255,255,0.045)' if isDarkTheme() else 'rgba(0,0,0,0.028)'};"
+            "border-radius: 8px;"
+            "}"
+        )
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(5)
+
+        source_device_id = str(source.get("source_device_id") or "").strip()
+        title_text = source_device_id or tr("profile.security.recovery.source.unknown", "Unknown Source Device")
+        if is_primary:
+            title_text = tr(
+                "profile.security.recovery.source.primary",
+                "{device_id} · Primary source",
+                device_id=title_text,
+            )
+        title = BodyLabel(title_text, card)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        source_user_id = str(source.get("source_user_id") or "").strip()
+        imported_at = str(source.get("imported_at") or "").strip()
+        exported_at = str(source.get("exported_at") or "").strip()
+        group_session_count = int(source.get("group_session_count", 0) or 0)
+        group_sender_key_count = int(source.get("group_sender_key_count", 0) or 0)
+
+        if source_user_id:
+            layout.addWidget(
+                self._device_detail_label(
+                    tr("profile.security.recovery.source.user", "Source user: {user_id}", user_id=source_user_id),
+                    card,
+                )
+            )
+        if imported_at:
+            layout.addWidget(
+                self._device_detail_label(
+                    tr("profile.security.recovery.source.imported", "Imported: {time}", time=imported_at),
+                    card,
+                )
+            )
+        if exported_at:
+            layout.addWidget(
+                self._device_detail_label(
+                    tr("profile.security.recovery.source.exported", "Exported: {time}", time=exported_at),
+                    card,
+                )
+            )
+        layout.addWidget(
+            self._device_detail_label(
+                tr(
+                    "profile.security.recovery.source.coverage",
+                    "Covers {sessions} group sessions and {sender_keys} sender keys.",
+                    sessions=group_session_count,
+                    sender_keys=group_sender_key_count,
+                ),
+                card,
+            )
+        )
+        return card
 
     def _render_devices(self, devices: list[dict[str, Any]], *, local_device_id: str) -> None:
         normalized_devices = [dict(item) for item in devices if isinstance(item, dict)]

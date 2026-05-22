@@ -1426,6 +1426,25 @@ def test_user_profile_flyout_wires_history_recovery_import_export() -> None:
     assert 'async def import_history_recovery_package(self, package: dict[str, Any] | None) -> dict[str, Any]:' in auth_controller
 
 
+def test_device_security_dialog_renders_history_recovery_diagnostics() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+
+    assert 'self.recovery_status_title = CaptionLabel(' in flyout
+    assert 'self.recovery_summary_label = BodyLabel("", self)' in flyout
+    assert 'self.recovery_source_container = QWidget(self)' in flyout
+    assert 'self._render_history_recovery_diagnostics(diagnostics)' in flyout
+    assert 'def _render_history_recovery_diagnostics(self, diagnostics: dict[str, Any]) -> None:' in flyout
+    assert 'source_devices = [dict(item) for item in list(diagnostics.get("source_devices") or []) if isinstance(item, dict)]' in flyout
+    assert 'primary_source_device_id = str(diagnostics.get("primary_source_device_id") or "").strip()' in flyout
+    assert 'signed_prekey_count = int(diagnostics.get("signed_prekey_count", 0) or 0)' in flyout
+    assert 'one_time_prekey_count = int(diagnostics.get("one_time_prekey_count", 0) or 0)' in flyout
+    assert 'group_sender_key_count = int(diagnostics.get("group_sender_key_count", 0) or 0)' in flyout
+    assert 'def _create_recovery_source_card(self, source: dict[str, Any], *, is_primary: bool) -> QWidget:' in flyout
+    assert 'source_device_id = str(source.get("source_device_id") or "").strip()' in flyout
+    assert 'group_session_count = int(source.get("group_session_count", 0) or 0)' in flyout
+    assert 'group_sender_key_count = int(source.get("group_sender_key_count", 0) or 0)' in flyout
+
+
 
 def test_message_delegate_uses_live_auth_profile_for_self_avatar_rendering() -> None:
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
