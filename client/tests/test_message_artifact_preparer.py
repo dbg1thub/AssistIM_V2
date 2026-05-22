@@ -65,18 +65,28 @@ class _FakeVoiceRuntime:
 
 
 class _FakeTaskManager:
-    def __init__(self, *, image_content: str = "图片里是一张会议白板，写着周五前确认预算。") -> None:
+    def __init__(
+        self,
+        *,
+        image_content: str = "图片里是一张会议白板，写着周五前确认预算。",
+        voice_content: str = "语音摘要：对方在确认周日下午三点见面。",
+    ) -> None:
         self.image_content = image_content
+        self.voice_content = voice_content
         self.requests = []
 
     async def run_once(self, request):
         self.requests.append(request)
+        if request.metadata.get("source") == "voice_summary":
+            content = self.voice_content
+        else:
+            content = self.image_content
         return AITaskSnapshot(
             task_id=request.task_id,
             session_id=request.session_id,
             task_type=getattr(request.task_type, "value", request.task_type),
             state=AITaskState.DONE,
-            content=self.image_content,
+            content=content,
         )
 
 
@@ -143,6 +153,44 @@ def test_message_artifact_preparer_transcribes_voice_for_media_context() -> None
         assert updated.extra[VOICE_TRANSCRIPT_EXTRA_KEY]["text"] == "语音里说周日下午三点见。"
         assert fake_message_manager.download_attachment_calls == ["m-voice"]
         assert fake_voice_runtime.calls == [("D:/voice/m-voice.m4a", 5)]
+
+    asyncio.run(scenario())
+
+
+def test_message_artifact_preparer_summarizes_long_voice_transcript_for_media_context() -> None:
+    class LongVoiceRuntime(_FakeVoiceRuntime):
+        async def transcribe(self, local_path: str, *, duration_seconds: int | None = None):
+            self.calls.append((local_path, duration_seconds))
+            return LocalVoiceTranscriptionResult(
+                text=" ".join([f"第{index}项需要继续确认预算和时间" for index in range(90)]),
+                language="zh",
+                language_probability=0.91,
+                duration_seconds=20,
+                metadata={"engine": "faster-whisper", "model_id": "small"},
+            )
+
+    async def scenario() -> None:
+        fake_message_manager = _FakeMessageManager()
+        fake_voice_runtime = LongVoiceRuntime()
+        fake_task_manager = _FakeTaskManager(voice_content="对方在集中确认预算、时间和后续负责人。")
+        message = _voice_message()
+        message.extra["duration"] = 20
+        fake_message_manager.messages[message.message_id] = message
+        preparer = MessageArtifactPreparer(
+            message_manager=fake_message_manager,
+            voice_transcription_runtime=fake_voice_runtime,
+            task_manager=fake_task_manager,
+        )
+
+        updated = await preparer.prepare_message(message, session=_session())
+
+        payload = updated.extra[VOICE_TRANSCRIPT_EXTRA_KEY]
+        assert payload["status"] == "ready"
+        assert payload["summary_status"] == "ready"
+        assert payload["summary_text"] == "对方在集中确认预算、时间和后续负责人。"
+        assert payload["summary_engine"] == "local_llm"
+        assert fake_task_manager.requests[0].metadata["source"] == "voice_summary"
+        assert fake_task_manager.requests[0].metadata["message_id"] == "m-voice"
 
     asyncio.run(scenario())
 

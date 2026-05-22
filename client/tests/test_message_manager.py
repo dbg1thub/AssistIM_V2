@@ -969,6 +969,61 @@ def test_message_manager_update_voice_transcript_persists_local_extra_and_emits(
     asyncio.run(scenario())
 
 
+def test_message_manager_voice_media_cache_prefers_ready_summary_text(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_ai_memory_indexing_service = FakeAIMemoryIndexingService()
+    fake_db.messages['m-voice-summary'] = ChatMessage(
+        message_id='m-voice-summary',
+        session_id='session-1',
+        sender_id='alice',
+        content='file:///voice.m4a',
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'duration': 18},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(
+        message_manager_module,
+        'get_ai_memory_indexing_service',
+        lambda: fake_ai_memory_indexing_service,
+        raising=False,
+    )
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        await manager.initialize()
+        try:
+            await manager.update_message_voice_transcript(
+                'm-voice-summary',
+                {
+                    'status': 'ready',
+                    'text': '这是一段很长的语音转写，包含大量细节。',
+                    'summary_status': 'ready',
+                    'summary_text': '对方在确认预算、时间和负责人。',
+                    'summary_engine': 'local_llm',
+                    'engine': 'faster-whisper',
+                },
+            )
+
+            media_cache = fake_db.media_cache_upserts[0]
+            assert media_cache["summary_status"] == "ready"
+            assert media_cache["summary_text"] == "对方在确认预算、时间和负责人。"
+            assert media_cache["runtime_kind"] == "local_asr+summary"
+            assert media_cache["model_name"] == "local_llm"
+            assert media_cache["detail"]["text"] == "这是一段很长的语音转写，包含大量细节。"
+            assert media_cache["detail"]["summary_text"] == "对方在确认预算、时间和负责人。"
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_update_file_analysis_persists_local_extra_and_emits(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])

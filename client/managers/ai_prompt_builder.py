@@ -84,6 +84,9 @@ class AIPromptBuilder:
     AI_CHAT_OUTPUT_CHARS = 0
     FILE_SUMMARY_INPUT_CHARS = 8000
     FILE_SUMMARY_OUTPUT_CHARS = 720
+    VOICE_SUMMARY_INPUT_CHARS = 5000
+    VOICE_SUMMARY_OUTPUT_CHARS = 420
+    VOICE_SUMMARY_TRIGGER_CHARS = 280
     IMAGE_SUMMARY_OUTPUT_CHARS = 520
 
     _DRAFT_TASK_TYPES = {
@@ -407,6 +410,51 @@ class AIPromptBuilder:
                 "message_id": str(message_id or ""),
                 "image_name": normalized_name,
                 "mime_type": normalized_mime_type,
+                "prompt_chars": len(prompt),
+            },
+        )
+
+    def build_voice_summary_request(
+        self,
+        transcript: str,
+        *,
+        session: Session | None = None,
+        message_id: str = "",
+        task_id: str = "",
+    ) -> AIRequest:
+        """Build a local-only request for summarizing one voice transcript."""
+        source = _normalize_text(transcript, max_chars=self.VOICE_SUMMARY_INPUT_CHARS)
+        if not source:
+            raise ValueError("voice transcript is required")
+        system_prompt = (
+            "你是 AssistIM 的聊天语音摘要助手。\n"
+            "使用标准聊天角色，不要输出思考过程，不要解释转写过程。\n"
+            "只基于语音转写总结，不能编造转写中没有的信息。"
+        )
+        prompt = (
+            "请总结下面这段聊天语音转写。\n"
+            "要求：\n"
+            "1. 输出 1-2 句，保留时间、地点、金额、联系人、待办和明确态度。\n"
+            "2. 如果转写像闲聊，只概括对回复有帮助的信息。\n"
+            "3. 不要逐字复述完整转写，不要输出 Markdown 表格，不要添加转写外的信息。\n\n"
+            f"语音转写：\n{source}"
+        )
+        return AIRequest(
+            task_id=task_id,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            task_type=AITaskType.CHAT,
+            privacy_scope=privacy_scope_for_session(session),
+            must_be_local=True,
+            stream=False,
+            temperature=0.2,
+            max_tokens=160,
+            max_output_chars=self.VOICE_SUMMARY_OUTPUT_CHARS,
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+            metadata={
+                "source": "voice_summary",
+                "message_id": str(message_id or ""),
+                "source_chars": len(source),
                 "prompt_chars": len(prompt),
             },
         )
@@ -851,6 +899,11 @@ class AIPromptBuilder:
             transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
             if str(transcript.get("status") or "").strip() != "ready":
                 return ""
+            summary_text = ""
+            if str(transcript.get("summary_status") or "").strip() == "ready":
+                summary_text = _normalize_text(transcript.get("summary_text"), max_chars=self.MAX_MESSAGE_CHARS)
+            if summary_text:
+                return f"[语音摘要: {summary_text}]"
             text = _normalize_text(transcript.get("text"), max_chars=self.MAX_MESSAGE_CHARS)
             return f"[语音转文字: {text}]" if text else ""
         return ""
@@ -958,6 +1011,11 @@ def reply_anchor_text(message: ChatMessage) -> str:
         transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         if str(transcript.get("status") or "").strip() != "ready":
             return ""
+        summary_text = ""
+        if str(transcript.get("summary_status") or "").strip() == "ready":
+            summary_text = _normalize_text(transcript.get("summary_text"), max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
+        if summary_text:
+            return f"[语音摘要: {summary_text}]"
         text = _normalize_text(transcript.get("text"), max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
         return f"[语音转文字: {text}]" if text else ""
     return ""

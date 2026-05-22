@@ -367,6 +367,33 @@ def test_image_summary_request_is_local_vision_request() -> None:
     assert "不要逐字输出完整 OCR" in prompt
 
 
+def test_voice_summary_request_is_local_and_bounded() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+    long_transcript = "。".join([f"第{index}点需要确认预算和时间" for index in range(80)])
+
+    request = builder.build_voice_summary_request(
+        long_transcript,
+        session=session,
+        message_id="m-voice",
+        task_id="voice-summary-test",
+    )
+
+    prompt = request.messages[0]["content"]
+    assert request.task_id == "voice-summary-test"
+    assert request.session_id == "s1"
+    assert request.task_type == AITaskType.CHAT
+    assert request.must_be_local is True
+    assert request.stream is False
+    assert request.privacy_scope == AIPrivacyScope.DIRECT_CONTEXT
+    assert request.max_output_chars == builder.VOICE_SUMMARY_OUTPUT_CHARS
+    assert request.metadata["source"] == "voice_summary"
+    assert request.metadata["message_id"] == "m-voice"
+    assert request.metadata["source_chars"] <= builder.VOICE_SUMMARY_INPUT_CHARS
+    assert "请总结下面这段聊天语音转写" in prompt
+    assert "第0点需要确认预算和时间" in prompt
+
+
 def test_message_translation_request_is_local_and_mode_aware() -> None:
     builder = AIPromptBuilder()
     session = Session(session_id="s1", name="Alice", session_type="direct")

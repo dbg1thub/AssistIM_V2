@@ -49,6 +49,16 @@ class MessageArtifactPreparer:
         if message.message_type == MessageType.VOICE:
             transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
             status = str(transcript.get("status") or "").strip()
+            summary_status = str(transcript.get("summary_status") or "").strip()
+            transcript_text = str(transcript.get("text") or "").strip()
+            if (
+                status == "ready"
+                and transcript_text
+                and len(transcript_text) > self._prompt_builder.VOICE_SUMMARY_TRIGGER_CHARS
+                and not (summary_status == "ready" and str(transcript.get("summary_text") or "").strip())
+                and summary_status not in {"pending", "failed", "skipped"}
+            ):
+                return True
             return not (status == "ready" and str(transcript.get("text") or "").strip()) and status not in {
                 "pending",
                 "failed",
@@ -66,16 +76,16 @@ class MessageArtifactPreparer:
 
     async def prepare_message(self, message: ChatMessage, *, session: Session | None = None) -> ChatMessage:
         if message.message_type == MessageType.VOICE:
-            return await self.prepare_voice_transcript(message)
+            return await self.prepare_voice_transcript(message, session=session)
         if message.message_type == MessageType.IMAGE:
             return await self.prepare_image_summary(message, session=session)
         return message
 
-    async def prepare_voice_transcript(self, message: ChatMessage) -> ChatMessage:
+    async def prepare_voice_transcript(self, message: ChatMessage, *, session: Session | None = None) -> ChatMessage:
         transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         status = str(transcript.get("status") or "").strip()
         if status == "ready" and str(transcript.get("text") or "").strip():
-            return message
+            return await self._ensure_voice_summary(message, transcript, session=session)
         if status in {"pending", "failed", "skipped"}:
             return message
 
@@ -157,6 +167,85 @@ class MessageArtifactPreparer:
                 language_probability=float(result.language_probability or 0.0),
                 metadata=dict(result.metadata or {}),
             )
+        persisted = await self._persist_voice_transcript(message, payload)
+        return await self._ensure_voice_summary(persisted, payload, session=session)
+
+    async def _ensure_voice_summary(
+        self,
+        message: ChatMessage,
+        transcript: dict[str, Any],
+        *,
+        session: Session | None = None,
+    ) -> ChatMessage:
+        """Generate a short local summary for long voice transcripts."""
+        text = " ".join(str(transcript.get("text") or "").strip().split())
+        if not text:
+            return message
+        if len(text) <= self._prompt_builder.VOICE_SUMMARY_TRIGGER_CHARS:
+            return message
+        summary_status = str(transcript.get("summary_status") or "").strip()
+        if summary_status in {"ready", "pending", "failed", "skipped"}:
+            return message
+
+        payload = dict(transcript)
+        try:
+            request = self._prompt_builder.build_voice_summary_request(
+                text,
+                session=session,
+                message_id=message.message_id,
+                task_id=self._task_id("voice-summary"),
+            )
+            async with self._voice_transcription_semaphore:
+                snapshot = await self._task_manager.run_once(request)
+        except Exception as exc:
+            logger.warning(
+                "[voice-summary] message_voice_summary_unavailable message_id=%s session_id=%s error=%s",
+                message.message_id,
+                message.session_id,
+                exc,
+            )
+            payload.update(
+                {
+                    "summary_status": "failed",
+                    "summary_reason": "runtime_error",
+                    "summary_error_code": exc.__class__.__name__,
+                    "summary_error_message": str(exc),
+                }
+            )
+            return await self._persist_voice_transcript(message, payload)
+
+        if not self._snapshot_is_done(snapshot):
+            error_code = str(getattr(snapshot.error_code, "value", snapshot.error_code) or snapshot.finish_reason or "voice_summary_failed")
+            payload.update(
+                {
+                    "summary_status": "failed",
+                    "summary_reason": self._voice_summary_failure_reason(error_code),
+                    "summary_error_code": error_code,
+                    "summary_error_message": str(snapshot.error_message or ""),
+                }
+            )
+            return await self._persist_voice_transcript(message, payload)
+
+        summary_text = " ".join(str(snapshot.content or "").strip().split())
+        if not summary_text:
+            payload.update({"summary_status": "skipped", "summary_reason": "empty"})
+        else:
+            payload.update(
+                {
+                    "summary_status": "ready",
+                    "summary_text": summary_text[: self._prompt_builder.VOICE_SUMMARY_OUTPUT_CHARS].rstrip(),
+                    "summary_engine": "local_llm",
+                }
+            )
+            snapshot_metadata = dict(getattr(snapshot, "metadata", {}) or {})
+            summary_model = str(
+                snapshot_metadata.get("model_name")
+                or snapshot_metadata.get("model_id")
+                or snapshot_metadata.get("model")
+                or ""
+            ).strip()
+            if summary_model:
+                payload["summary_model"] = summary_model
         return await self._persist_voice_transcript(message, payload)
 
     async def prepare_image_summary(self, message: ChatMessage, *, session: Session | None = None) -> ChatMessage:
@@ -331,6 +420,17 @@ class MessageArtifactPreparer:
             return "vision_unavailable"
         if normalized == "AI_CONTEXT_TOO_LONG":
             return "image_too_large"
+        if normalized == "AI_USER_CANCELLED":
+            return "cancelled"
+        return "runtime_error"
+
+    @staticmethod
+    def _voice_summary_failure_reason(error_code: str) -> str:
+        normalized = str(error_code or "").strip()
+        if normalized in {"AI_LOCAL_REQUIRED_UNAVAILABLE", "AI_MODEL_NOT_FOUND", "AI_RUNTIME_UNAVAILABLE"}:
+            return "model_missing"
+        if normalized == "AI_CONTEXT_TOO_LONG":
+            return "transcript_too_long"
         if normalized == "AI_USER_CANCELLED":
             return "cancelled"
         return "runtime_error"

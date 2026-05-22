@@ -204,7 +204,17 @@ def _peer_voice_message(
     *,
     transcript_text: str = "你帮我看一下这个时间行不行？",
     transcript_status: str = "ready",
+    summary_text: str = "",
+    summary_status: str = "",
 ) -> ChatMessage:
+    transcript = {
+        "status": transcript_status,
+        "text": transcript_text,
+    }
+    if summary_status:
+        transcript["summary_status"] = summary_status
+    if summary_text:
+        transcript["summary_text"] = summary_text
     return ChatMessage(
         message_id=message_id,
         session_id="s1",
@@ -212,12 +222,7 @@ def _peer_voice_message(
         content="[voice]",
         message_type=MessageType.VOICE,
         status=MessageStatus.RECEIVED,
-        extra={
-            VOICE_TRANSCRIPT_EXTRA_KEY: {
-                "status": transcript_status,
-                "text": transcript_text,
-            }
-        },
+        extra={VOICE_TRANSCRIPT_EXTRA_KEY: transcript},
     )
 
 
@@ -718,6 +723,34 @@ def test_suggest_replies_uses_ready_voice_transcript_as_anchor() -> None:
         assert "当前待回复消息组：" in prompt
         assert "[语音转文字: 你帮我看一下这个时间行不行？]" in prompt
         assert fake.requests[0].metadata["anchor_message_id"] == "voice-1"
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_prefers_ready_voice_summary_over_long_transcript() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="可以，我按摘要里的时间继续确认。\n我看这个安排可行。\n这会儿我不方便定下来。\n我晚点再回复你。"
+        )
+        manager = AIAssistManager(task_manager=fake)
+        long_transcript = " ".join([f"第{index}项需要继续确认预算和时间" for index in range(100)])
+
+        state = await manager.suggest_replies(
+            _session(),
+            [
+                _peer_voice_message(
+                    transcript_text=long_transcript,
+                    summary_status="ready",
+                    summary_text="对方在确认预算、时间和后续负责人。",
+                )
+            ],
+            current_user_id="me",
+        )
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "[语音摘要: 对方在确认预算、时间和后续负责人。]" in prompt
+        assert "第99项需要继续确认预算和时间" not in prompt
 
     asyncio.run(scenario())
 

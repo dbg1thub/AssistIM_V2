@@ -3160,14 +3160,25 @@ class MessageManager:
 
         artifact_payload = dict(artifact or {})
         status = str(artifact_payload.get("status") or "pending").strip() or "pending"
-        text = str(artifact_payload.get("text") or "") if status == "ready" else ""
+        summary_text = ""
+        if normalized_media_kind == "audio" and status == "ready":
+            if str(artifact_payload.get("summary_status") or "").strip() == "ready":
+                summary_text = str(artifact_payload.get("summary_text") or "").strip()
+        text = (summary_text or str(artifact_payload.get("text") or "")) if status == "ready" else ""
         model_name = str(
-            artifact_payload.get("model_name")
+            artifact_payload.get("summary_model")
+            or artifact_payload.get("summary_model_name")
+            or artifact_payload.get("model_name")
             or artifact_payload.get("model_id")
+            or artifact_payload.get("summary_engine")
             or artifact_payload.get("engine")
             or ""
         ).strip()
-        runtime_kind = "local_asr" if normalized_media_kind == "audio" else "multimodal_sidecar"
+        runtime_kind = (
+            "local_asr+summary"
+            if normalized_media_kind == "audio" and summary_text
+            else "local_asr" if normalized_media_kind == "audio" else "multimodal_sidecar"
+        )
         updated_at = int(time.time())
         return {
             "session_id": session_id,
