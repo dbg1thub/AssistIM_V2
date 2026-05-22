@@ -2064,6 +2064,21 @@ def test_chat_info_action_rows_and_search_overlay_follow_drawer_rules() -> None:
     assert 'GroupMemberManagementRequest(' in drawer
 
 
+def test_chat_info_identity_entry_renders_basic_identity_status() -> None:
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+
+    assert 'self.subtitle_label = CaptionLabel("", self)' in drawer
+    assert 'def set_subtitle(self, value: str) -> None:' in drawer
+    assert 'self.identity_row.set_subtitle(self._identity_status_summary(security_summary))' in drawer
+    assert 'def _identity_status_summary(security_summary: dict[str, Any]) -> str:' in drawer
+    assert 'identity_status = str(security_summary.get("identity_status") or "").strip()' in drawer
+    assert 'short_code = str(security_summary.get("identity_primary_verification_code_short") or "").strip()' in drawer
+    assert 'short_fingerprint = str(security_summary.get("identity_primary_verification_fingerprint_short") or "").strip()' in drawer
+    assert 'chat.info.security.status.identity_changed' in drawer
+    assert 'chat.info.security.status.unverified' in drawer
+    assert 'chat.info.security.status.verified' in drawer
+
+
 def test_group_profile_realtime_pipeline_is_wired() -> None:
     message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
     session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')

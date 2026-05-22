@@ -385,7 +385,16 @@ class ChatInfoActionRow(QWidget):
         self.title_label.setObjectName("chatInfoActionTitle")
         self.title_label.setCursor(Qt.PointingHandCursor)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        layout.addWidget(self.title_label, 1)
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+        text_layout.addWidget(self.title_label)
+        self.subtitle_label = CaptionLabel("", self)
+        self.subtitle_label.setObjectName("chatInfoActionSubtitle")
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.hide()
+        text_layout.addWidget(self.subtitle_label)
+        layout.addLayout(text_layout, 1)
 
         self.switch_button: SwitchButton | None = None
         self.chevron_icon: IconWidget | None = None
@@ -416,6 +425,12 @@ class ChatInfoActionRow(QWidget):
 
     def is_checked(self) -> bool:
         return bool(self.switch_button and self.switch_button.isChecked())
+
+    def set_subtitle(self, value: str) -> None:
+        """Set optional status text below the row title."""
+        normalized = str(value or "").strip()
+        self.subtitle_label.setText(normalized)
+        self.subtitle_label.setVisible(bool(normalized))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -538,6 +553,42 @@ class ChatInfoPrivateContent(QWidget):
         self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
         security_summary = session.security_summary()
         self.identity_row.setVisible(str(security_summary.get("encryption_mode") or "") == "e2ee_private")
+        self.identity_row.set_subtitle(self._identity_status_summary(security_summary))
+
+    @staticmethod
+    def _identity_status_summary(security_summary: dict[str, Any]) -> str:
+        identity_status = str(security_summary.get("identity_status") or "").strip()
+        short_code = str(security_summary.get("identity_primary_verification_code_short") or "").strip()
+        short_fingerprint = str(security_summary.get("identity_primary_verification_fingerprint_short") or "").strip()
+        short_value = short_code or short_fingerprint
+        if identity_status == "identity_changed":
+            status_text = tr(
+                "chat.info.security.status.identity_changed",
+                "Identity changed · verify before sending",
+            )
+        elif identity_status == "unverified":
+            status_text = tr(
+                "chat.info.security.status.unverified",
+                "Unverified · compare safety code",
+            )
+        elif identity_status == "verified":
+            status_text = tr(
+                "chat.info.security.status.verified",
+                "Verified on this device",
+            )
+        else:
+            status_text = tr(
+                "chat.info.security.status.unavailable",
+                "Identity status unavailable",
+            )
+        if short_value:
+            return tr(
+                "chat.info.security.status.with_code",
+                "{status} · {code}",
+                status=status_text,
+                code=short_value,
+            )
+        return status_text
 
 
 class ChatInfoDetailField(QWidget):
