@@ -132,8 +132,22 @@ QWidget#MomentCard {
     border-radius: 0px;
 }
 
-BodyLabel#momentContentLabel {
+QWidget#MomentCardHeaderRow,
+QWidget#MomentCardContentRow,
+QWidget#MomentCardActionRow,
+QWidget#MomentCardIdentityArea,
+QWidget#MomentCardHeaderActions,
+QWidget#MomentCardLikeArea {
+    background: transparent;
+    border: none;
+}
+
+QLabel#momentContentLabel {
     color: {{TEXT_PRIMARY}};
+}
+
+QWidget#momentMediaGrid {
+    border: none;
 }
 
 QFrame#MomentCardDivider {
@@ -155,11 +169,32 @@ QLabel#momentStatsLabel {
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QLabel#momentMediaTile {
+QLabel#momentImageCard,
+QLabel#momentVideoCard {
     background: {{TILE_BG}};
     border: 1px solid {{TILE_BORDER}};
     border-radius: {{RADIUS_CARD}};
     color: {{TILE_TEXT}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QFrame#MomentActionBadge {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: 10px;
+}
+
+QFrame#MomentActionBadge:hover {
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR_STRONG}};
+}
+
+QFrame#MomentActionBadge[pressed="true"] {
+    background: {{BORDER_COLOR}};
+}
+
+QLabel#MomentActionBadgeText {
+    color: {{TEXT_SECONDARY}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 

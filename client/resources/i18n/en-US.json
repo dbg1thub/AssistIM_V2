@@ -787,6 +787,7 @@
   "discovery.dialog.media_too_large": "Selected media exceeds {limit}. Please compress it before publishing.",
   "discovery.dialog.media_too_large_details": "{names} exceed {limit}. Please compress or choose smaller files.",
   "discovery.card.more_tooltip": "More",
+  "discovery.card.badge_placeholder": "Moment",
   "discovery.card.edit_tooltip": "Edit moment",
   "discovery.card.expand": "Read More",
   "discovery.card.collapse": "Collapse",

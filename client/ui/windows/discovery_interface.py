@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -37,6 +38,7 @@ from qfluentwidgets import (
     MessageBoxBase,
     PrimaryPushButton,
     PushButton,
+    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     SubtitleLabel,
@@ -301,6 +303,24 @@ class ClickableMediaLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class MomentImageCard(ClickableMediaLabel):
+    """Rounded image card used by the moments media grid."""
+
+    def __init__(self, media: MomentMediaRecord, parent=None):
+        super().__init__(media, parent)
+        self.setObjectName("momentImageCard")
+        self.setText(tr("discovery.image.placeholder", "Image"))
+
+
+class MomentVideoCard(ClickableMediaLabel):
+    """Rounded video card used by the moments media grid."""
+
+    def __init__(self, media: MomentMediaRecord, parent=None):
+        super().__init__(media, parent)
+        self.setObjectName("momentVideoCard")
+        self.setText(tr("discovery.video.placeholder", "Video"))
+
+
 class MomentMediaGrid(QWidget):
     """Responsive grid for moment image and video attachments."""
 
@@ -358,8 +378,7 @@ class MomentMediaGrid(QWidget):
 
         for index, media in enumerate(self._media):
             row, col, row_span, col_span, width, height = sizes[index]
-            label = ClickableMediaLabel(media, self)
-            label.setObjectName("momentMediaTile")
+            label = MomentVideoCard(media, self) if media.is_video else MomentImageCard(media, self)
             label.setFixedSize(width, height)
             self._load_media(label, media, width, height)
             label.clicked.connect(self._emit_media_request)
@@ -1547,6 +1566,51 @@ class EditMomentDialog(CreateMomentDialog):
         self.accept()
 
 
+class MomentActionBadge(QFrame):
+    """Small pill action used by moment interaction rows."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentActionBadge")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setProperty("pressed", False)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(4)
+
+        self.text_label = CaptionLabel(text, self)
+        self.text_label.setObjectName("MomentActionBadgeText")
+        layout.addWidget(self.text_label)
+
+    def setText(self, text: str) -> None:
+        self.text_label.setText(str(text or ""))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setProperty("pressed", True)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        was_pressed = bool(self.property("pressed"))
+        self.setProperty("pressed", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+        if was_pressed and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class MomentCard(QWidget):
     """Single moment card in the timeline."""
 
@@ -1557,88 +1621,105 @@ class MomentCard(QWidget):
     delete_requested = Signal(str)
     comment_delete_requested = Signal(str, str)
 
-    CONTENT_PREVIEW_LENGTH = 180
+    DISPLAY_TEXT_LIMIT = 500
 
     def __init__(self, moment: MomentRecord, parent=None):
         super().__init__(parent)
         self.moment = moment
-        self._content_expanded = False
         self._image_dialogs: set[QDialog] = set()
         self._setup_ui()
         self._apply_moment()
 
     def _setup_ui(self) -> None:
         self.setObjectName("MomentCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(14)
+        self.header_row = QWidget(self)
+        self.header_row.setObjectName("MomentCardHeaderRow")
+        header_layout = QHBoxLayout(self.header_row)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(14)
 
-        self.avatar = DiscoveryAvatar(52, self)
-        self.name_label = SubtitleLabel("", self)
-        self.time_label = CaptionLabel("", self)
+        identity_area = QWidget(self.header_row)
+        identity_area.setObjectName("MomentCardIdentityArea")
+        identity_layout = QHBoxLayout(identity_area)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(12)
+
+        self.avatar = DiscoveryAvatar(52, identity_area)
+        self.name_label = SubtitleLabel("", identity_area)
+        self.time_label = CaptionLabel("", identity_area)
         info_layout = QVBoxLayout()
         info_layout.setContentsMargins(0, 0, 0, 0)
         info_layout.setSpacing(4)
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.time_label)
+        identity_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
+        identity_layout.addLayout(info_layout, 1)
 
-        self.edit_button = TransparentToolButton(AppIcon.EDIT, self)
-        self.edit_button.setToolTip(tr("discovery.card.edit_tooltip", "Edit moment"))
-        self.edit_button.clicked.connect(self._request_edit)
-        self.more_button = TransparentToolButton(AppIcon.CANCEL_MEDIUM, self)
-        self.more_button.setToolTip(tr("discovery.card.delete_tooltip", "Delete moment"))
-        self.more_button.clicked.connect(self._request_delete)
-        _apply_safe_button_font(self.edit_button, self.more_button)
+        header_actions = QWidget(self.header_row)
+        header_actions.setObjectName("MomentCardHeaderActions")
+        header_actions_layout = QHBoxLayout(header_actions)
+        header_actions_layout.setContentsMargins(0, 0, 0, 0)
+        header_actions_layout.setSpacing(8)
+        self.header_badge = MomentActionBadge(tr("discovery.card.badge_placeholder", "Moment"), header_actions)
+        self.header_badge.setObjectName("MomentHeaderBadge")
+        self.more_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, self.header_row)
+        self.more_button.setToolTip(tr("discovery.card.more_tooltip", "More"))
+        self.more_button.clicked.connect(self._show_more_menu)
+        _apply_safe_button_font(self.more_button)
+        header_actions_layout.addWidget(self.header_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_actions_layout.addWidget(self.more_button, 0, Qt.AlignmentFlag.AlignTop)
 
-        header_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
-        header_row.addLayout(info_layout, 1)
-        header_row.addWidget(self.edit_button, 0, Qt.AlignmentFlag.AlignTop)
-        header_row.addWidget(self.more_button, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(header_row)
+        header_layout.addWidget(identity_area, 1)
+        header_layout.addWidget(header_actions, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.header_row)
 
-        self.content_label = BodyLabel("", self)
+        self.content_row = QWidget(self)
+        self.content_row.setObjectName("MomentCardContentRow")
+        content_layout = QVBoxLayout(self.content_row)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        self.content_label = BodyLabel("", self.content_row)
         self.content_label.setObjectName("momentContentLabel")
         self.content_label.setWordWrap(True)
-        layout.addWidget(self.content_label)
-
-        self.expand_button = PushButton(tr("discovery.card.expand", "Read More"), self)
-        self.expand_button.setFixedHeight(30)
-        self.expand_button.clicked.connect(self._toggle_content)
-        layout.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignLeft)
+        content_layout.addWidget(self.content_label)
+        layout.addWidget(self.content_row)
 
         self.media_grid = MomentMediaGrid([], self)
+        self.media_grid.setObjectName("momentMediaGrid")
         self.media_grid.image_requested.connect(self._open_image)
         self.media_grid.video_requested.connect(self._open_video)
         layout.addWidget(self.media_grid)
 
-        self.stats_label = CaptionLabel("", self)
-        self.stats_label.setObjectName("momentStatsLabel")
-        layout.addWidget(self.stats_label)
+        self.action_row = QWidget(self)
+        self.action_row.setObjectName("MomentCardActionRow")
+        action_row_layout = QHBoxLayout(self.action_row)
+        action_row_layout.setContentsMargins(0, 0, 0, 0)
+        action_row_layout.setSpacing(8)
 
-        divider = QFrame(self)
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setObjectName("MomentCardDivider")
-        layout.addWidget(divider)
+        like_area = QWidget(self.action_row)
+        like_area.setObjectName("MomentCardLikeArea")
+        like_layout = QHBoxLayout(like_area)
+        like_layout.setContentsMargins(0, 0, 0, 0)
+        like_layout.setSpacing(6)
+        self.like_count_badge = MomentActionBadge("", self.action_row)
+        self.like_badge = MomentActionBadge("", self.action_row)
+        self.like_badge.clicked.connect(self._toggle_like)
+        like_layout.addWidget(self.like_count_badge)
+        like_layout.addWidget(self.like_badge)
 
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(10)
-
-        self.like_button = PushButton("", self)
-        self.comment_button = PushButton("", self)
-        self.comment_button.clicked.connect(self._open_comment_editor)
-        self.like_button.clicked.connect(self._toggle_like)
-
-        action_row.addWidget(self.like_button, 0)
-        action_row.addWidget(self.comment_button, 0)
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
+        self.comment_badge = MomentActionBadge("", self.action_row)
+        self.comment_badge.clicked.connect(self._open_comment_editor)
+        action_row_layout.addWidget(like_area, 0)
+        action_row_layout.addStretch(1)
+        action_row_layout.addWidget(self.comment_badge, 0)
+        layout.addWidget(self.action_row)
 
         self.comment_section = AnimatedCommentSection([], self, moment_id=self.moment.id, comments_truncated=self.moment.comments_truncated)
         self.comment_section.comment_submitted.connect(self._submit_comment)
@@ -1660,13 +1741,15 @@ class MomentCard(QWidget):
         self.media_grid.deleteLater()
         if self.moment.media:
             self.media_grid = MomentMediaGrid(self.moment.media, self)
+            self.media_grid.setObjectName("momentMediaGrid")
             self.media_grid.image_requested.connect(self._open_image)
             self.media_grid.video_requested.connect(self._open_video)
-            self.layout().insertWidget(3, self.media_grid)
+            self.layout().insertWidget(2, self.media_grid)
         else:
             self.media_grid = MomentMediaGrid([], self)
+            self.media_grid.setObjectName("momentMediaGrid")
             self.media_grid.hide()
-            self.layout().insertWidget(3, self.media_grid)
+            self.layout().insertWidget(2, self.media_grid)
         self.comment_section.set_comments(
             self.moment.comments,
             moment_id=self.moment.id,
@@ -1676,17 +1759,12 @@ class MomentCard(QWidget):
 
     def _refresh_content(self) -> None:
         text = self.moment.content.strip() or tr("discovery.card.no_content", "This moment has no body text yet.")
-        is_long = len(text) > self.CONTENT_PREVIEW_LENGTH
-        if is_long and not self._content_expanded:
-            self.content_label.setText(text[: self.CONTENT_PREVIEW_LENGTH].rstrip() + "…")
-        else:
-            self.content_label.setText(text)
-        self.expand_button.setVisible(is_long)
-        self.expand_button.setText(
-            tr("discovery.card.collapse", "Collapse")
-            if self._content_expanded
-            else tr("discovery.card.expand", "Read More")
-        )
+        self.content_label.setText(self._limited_content_text(text))
+
+    def _limited_content_text(self, text: str) -> str:
+        if len(text) <= self.DISPLAY_TEXT_LIMIT:
+            return text
+        return text[: self.DISPLAY_TEXT_LIMIT].rstrip() + "…"
 
     def _refresh_actions(self) -> None:
         like_prefix = (
@@ -1694,25 +1772,12 @@ class MomentCard(QWidget):
             if self.moment.is_liked
             else tr("discovery.card.like", "Like")
         )
-        self.like_button.setText(f"{like_prefix} {self.moment.like_count}" if self.moment.like_count else like_prefix)
+        self.like_count_badge.setText(str(max(0, self.moment.like_count)))
+        self.like_badge.setText(like_prefix)
         comment_prefix = tr("discovery.card.comment", "Comment")
-        self.comment_button.setText(
+        self.comment_badge.setText(
             f"{comment_prefix} {self.moment.comment_count}" if self.moment.comment_count else comment_prefix
         )
-        self.edit_button.setVisible(self.moment.is_self)
-        self.more_button.setVisible(self.moment.is_self)
-
-        if self.moment.like_count or self.moment.comment_count:
-            self.stats_label.setText(
-                tr(
-                    "discovery.card.stats_summary",
-                    "{likes} likes · {comments} comments",
-                    likes=self.moment.like_count,
-                    comments=self.moment.comment_count,
-                )
-            )
-        else:
-            self.stats_label.setText(tr("discovery.card.stats_empty", "No interactions yet. Be the first."))
 
     def set_like_state(self, liked: bool, like_count: int) -> None:
         """Update like state from optimistic UI or rollback."""
@@ -1743,7 +1808,6 @@ class MomentCard(QWidget):
     def apply_update(self, moment: MomentRecord) -> None:
         """Refresh visible text, media, visibility, and interaction state after edit."""
         self.moment = moment
-        self._content_expanded = False
         self._apply_moment()
 
     def apply_detail(self, moment: MomentRecord) -> None:
@@ -1759,10 +1823,6 @@ class MomentCard(QWidget):
         self.comment_section._set_expanded(True)
         self._refresh_actions()
 
-    def _toggle_content(self) -> None:
-        self._content_expanded = not self._content_expanded
-        self._refresh_content()
-
     def _toggle_like(self) -> None:
         next_liked = not self.moment.is_liked
         next_count = self.moment.like_count + (1 if next_liked else -1)
@@ -1777,6 +1837,18 @@ class MomentCard(QWidget):
 
     def _request_detail(self, moment_id: str) -> None:
         self.detail_requested.emit(moment_id)
+
+    def _show_more_menu(self) -> None:
+        menu = RoundMenu(parent=self)
+        edit_action = Action(AppIcon.EDIT, tr("discovery.card.edit_tooltip", "Edit moment"), parent=menu)
+        delete_action = Action(AppIcon.CANCEL_MEDIUM, tr("discovery.card.delete_tooltip", "Delete moment"), parent=menu)
+        edit_action.setEnabled(self.moment.is_self)
+        delete_action.setEnabled(self.moment.is_self)
+        edit_action.triggered.connect(self._request_edit)
+        delete_action.triggered.connect(self._request_delete)
+        menu.addAction(edit_action)
+        menu.addAction(delete_action)
+        menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
 
     def _request_delete(self) -> None:
         self.delete_requested.emit(self.moment.id)

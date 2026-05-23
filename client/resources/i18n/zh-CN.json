@@ -802,6 +802,7 @@
   "discovery.dialog.media_too_large": "选择的媒体超过 {limit}，请压缩后再发布。",
   "discovery.dialog.media_too_large_details": "{names} 超过 {limit}，请压缩或选择更小的文件。",
   "discovery.card.more_tooltip": "更多",
+  "discovery.card.badge_placeholder": "动态",
   "discovery.card.edit_tooltip": "编辑动态",
   "discovery.card.expand": "全文",
   "discovery.card.collapse": "收起",

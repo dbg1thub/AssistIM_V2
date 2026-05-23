@@ -476,6 +476,44 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'QLabel#discoverySummaryLabel' not in qss
 
 
+def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    moment_card_block = discovery_interface.split('class MomentCard(QWidget):', 1)[1].split(
+        'class MomentsCoverBanner(QFrame):',
+        1,
+    )[0]
+
+    assert 'class MomentImageCard(ClickableMediaLabel):' in discovery_interface
+    assert 'class MomentVideoCard(ClickableMediaLabel):' in discovery_interface
+    assert 'class MomentActionBadge(QFrame):' in discovery_interface
+    assert 'DISPLAY_TEXT_LIMIT = 500' in moment_card_block
+    assert 'CONTENT_PREVIEW_LENGTH' not in moment_card_block
+    assert '_content_expanded' not in moment_card_block
+    assert 'expand_button' not in moment_card_block
+    assert 'def _toggle_content' not in moment_card_block
+    assert 'self.header_row = QWidget(self)' in moment_card_block
+    assert 'self.content_row = QWidget(self)' in moment_card_block
+    assert 'self.media_grid = MomentMediaGrid([], self)' in moment_card_block
+    assert 'self.action_row = QWidget(self)' in moment_card_block
+    assert 'layout.addWidget(self.comment_section)' in moment_card_block
+    assert 'self.more_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, self.header_row)' in moment_card_block
+    assert 'self.more_button.clicked.connect(self._show_more_menu)' in moment_card_block
+    assert 'menu = RoundMenu(parent=self)' in moment_card_block
+    assert 'Action(AppIcon.EDIT, tr("discovery.card.edit_tooltip", "Edit moment"), parent=menu)' in moment_card_block
+    assert 'Action(AppIcon.CANCEL_MEDIUM, tr("discovery.card.delete_tooltip", "Delete moment"), parent=menu)' in moment_card_block
+    assert 'self.like_count_badge = MomentActionBadge("", self.action_row)' in moment_card_block
+    assert 'self.like_badge = MomentActionBadge("", self.action_row)' in moment_card_block
+    assert 'self.comment_badge = MomentActionBadge("", self.action_row)' in moment_card_block
+    assert 'self.like_badge.clicked.connect(self._toggle_like)' in moment_card_block
+    assert 'self.comment_badge.clicked.connect(self._open_comment_editor)' in moment_card_block
+    assert 'self.content_label.setText(self._limited_content_text(text))' in moment_card_block
+    assert 'def _limited_content_text(self, text: str) -> str:' in moment_card_block
+    assert 'return text[: self.DISPLAY_TEXT_LIMIT].rstrip() + "…"' in moment_card_block
+    assert 'MomentImageCard(media, self)' in discovery_interface
+    assert 'MomentVideoCard(media, self)' in discovery_interface
+    assert 'list(media[:9])' in discovery_interface
+
+
 def test_discovery_redesign_i18n_resources_are_localized() -> None:
     zh_cn = json.loads(Path('client/resources/i18n/zh-CN.json').read_text(encoding='utf-8'))
     en_us = json.loads(Path('client/resources/i18n/en-US.json').read_text(encoding='utf-8'))
