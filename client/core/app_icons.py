@@ -23,8 +23,8 @@ _svg_template_cache: dict[str, str] = {}
 _svg_markup_cache: dict[tuple[str, str, str, str], str] = {}
 
 _THEME_ICON_COLOR = {
-    Theme.LIGHT: "#797979",
-    Theme.DARK: "#929292",
+    Theme.LIGHT: "#686868",
+    Theme.DARK: "#B8B8B8",
 }
 
 

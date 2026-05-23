@@ -6108,8 +6108,8 @@ def test_app_icon_default_theme_colors_match_fluent_icon_palette() -> None:
     dark_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.DARK)
     explicit_fill_svg = app_icons_module._render_svg_markup('add', fill='#202020')
 
-    assert '#797979' in light_svg
-    assert '#929292' in dark_svg
+    assert '#686868' in light_svg
+    assert '#B8B8B8' in dark_svg
     assert '#202020' in explicit_fill_svg
     assert 'opacity=' not in light_svg
     assert 'opacity=' not in dark_svg
