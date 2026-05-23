@@ -321,6 +321,28 @@ class MomentVideoCard(ClickableMediaLabel):
         self.setText(tr("discovery.video.placeholder", "Video"))
 
 
+def _rounded_media_pixmap(pixmap: QPixmap, width: int, height: int, radius: int = 10) -> QPixmap:
+    """Scale and clip a media pixmap so image content keeps rounded corners."""
+    target = QPixmap(width, height)
+    target.fill(Qt.GlobalColor.transparent)
+    scaled = pixmap.scaled(
+        width,
+        height,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    painter = QPainter(target)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        clip = QPainterPath()
+        clip.addRoundedRect(target.rect(), radius, radius)
+        painter.setClipPath(clip)
+        painter.drawPixmap((width - scaled.width()) // 2, (height - scaled.height()) // 2, scaled)
+    finally:
+        painter.end()
+    return target
+
+
 class MomentMediaGrid(QWidget):
     """Responsive grid for moment image and video attachments."""
 
@@ -341,6 +363,8 @@ class MomentMediaGrid(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(8)
         self._layout.setVerticalSpacing(8)
+        self._layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
         self.set_media(media)
 
     def set_media(self, media: list[MomentMediaRecord]) -> None:
@@ -448,39 +472,26 @@ class MomentMediaGrid(QWidget):
 
     @staticmethod
     def _apply_scaled_pixmap(label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
-        scaled = pixmap.scaled(
-            width,
-            height,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        label.setPixmap(scaled)
+        label.setPixmap(_rounded_media_pixmap(pixmap, width, height))
         label.setText("")
 
     def _apply_video_placeholder(self, label: QLabel, width: int, height: int) -> None:
         pixmap = QPixmap(width, height)
         pixmap.fill(QColor(37, 43, 51) if isDarkTheme() else QColor(224, 232, 240))
-        painter = QPainter(pixmap)
+        target = _rounded_media_pixmap(pixmap, width, height)
+        painter = QPainter(target)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._draw_video_overlay(painter, width, height, show_label=True)
         finally:
             painter.end()
-        label.setPixmap(pixmap)
+        label.setPixmap(target)
         label.setText("")
 
     def _apply_video_thumbnail(self, label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
-        target = QPixmap(width, height)
-        target.fill(Qt.GlobalColor.transparent)
-        scaled = pixmap.scaled(
-            width,
-            height,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        target = _rounded_media_pixmap(pixmap, width, height)
         painter = QPainter(target)
         try:
-            painter.drawPixmap((width - scaled.width()) // 2, (height - scaled.height()) // 2, scaled)
             painter.fillRect(0, 0, width, height, QColor(0, 0, 0, 30))
             self._draw_video_overlay(painter, width, height, show_label=False)
         finally:
@@ -1652,7 +1663,7 @@ class MomentCard(QWidget):
         identity_layout.setSpacing(12)
 
         self.avatar = DiscoveryAvatar(52, identity_area)
-        self.name_label = SubtitleLabel("", identity_area)
+        self.name_label = BodyLabel("", identity_area)
         self.time_label = CaptionLabel("", identity_area)
         info_layout = QVBoxLayout()
         info_layout.setContentsMargins(0, 0, 0, 0)
@@ -1695,7 +1706,7 @@ class MomentCard(QWidget):
         self.media_grid.setObjectName("momentMediaGrid")
         self.media_grid.image_requested.connect(self._open_image)
         self.media_grid.video_requested.connect(self._open_video)
-        layout.addWidget(self.media_grid)
+        layout.addWidget(self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.action_row = QWidget(self)
         self.action_row.setObjectName("MomentCardActionRow")
@@ -1744,12 +1755,12 @@ class MomentCard(QWidget):
             self.media_grid.setObjectName("momentMediaGrid")
             self.media_grid.image_requested.connect(self._open_image)
             self.media_grid.video_requested.connect(self._open_video)
-            self.layout().insertWidget(2, self.media_grid)
+            self.layout().insertWidget(2, self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)
         else:
             self.media_grid = MomentMediaGrid([], self)
             self.media_grid.setObjectName("momentMediaGrid")
             self.media_grid.hide()
-            self.layout().insertWidget(2, self.media_grid)
+            self.layout().insertWidget(2, self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)
         self.comment_section.set_comments(
             self.moment.comments,
             moment_id=self.moment.id,

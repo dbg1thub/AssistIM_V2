@@ -486,12 +486,17 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
     assert 'class MomentImageCard(ClickableMediaLabel):' in discovery_interface
     assert 'class MomentVideoCard(ClickableMediaLabel):' in discovery_interface
     assert 'class MomentActionBadge(QFrame):' in discovery_interface
+    assert 'def _rounded_media_pixmap(pixmap: QPixmap, width: int, height: int, radius: int = 10) -> QPixmap:' in discovery_interface
+    assert 'clip.addRoundedRect(target.rect(), radius, radius)' in discovery_interface
+    assert 'self._layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)' in discovery_interface
+    assert 'self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)' in discovery_interface
     assert 'DISPLAY_TEXT_LIMIT = 500' in moment_card_block
     assert 'CONTENT_PREVIEW_LENGTH' not in moment_card_block
     assert '_content_expanded' not in moment_card_block
     assert 'expand_button' not in moment_card_block
     assert 'def _toggle_content' not in moment_card_block
     assert 'self.header_row = QWidget(self)' in moment_card_block
+    assert 'self.name_label = BodyLabel("", identity_area)' in moment_card_block
     assert 'self.content_row = QWidget(self)' in moment_card_block
     assert 'self.media_grid = MomentMediaGrid([], self)' in moment_card_block
     assert 'self.action_row = QWidget(self)' in moment_card_block
@@ -511,6 +516,8 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
     assert 'return text[: self.DISPLAY_TEXT_LIMIT].rstrip() + "…"' in moment_card_block
     assert 'MomentImageCard(media, self)' in discovery_interface
     assert 'MomentVideoCard(media, self)' in discovery_interface
+    assert 'self.layout().insertWidget(2, self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)' in moment_card_block
+    assert 'layout.addWidget(self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)' in moment_card_block
     assert 'list(media[:9])' in discovery_interface
 
 
