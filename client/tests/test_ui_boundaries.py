@@ -2548,12 +2548,18 @@ def test_chat_header_security_badges_are_driven_from_session_summary() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
 
     assert 'from qfluentwidgets import BodyLabel, CaptionLabel, InfoBadge, InfoLevel, TransparentToolButton' in chat_header
-    assert 'HEADER_MARGIN = 12' in chat_header
+    assert 'HEADER_HEIGHT = 60' in chat_header
+    assert 'HEADER_DIVIDER_HEIGHT = 1' in chat_header
+    assert 'HEADER_ROW_HEIGHT = HEADER_HEIGHT - HEADER_DIVIDER_HEIGHT' in chat_header
+    assert 'HEADER_HORIZONTAL_MARGIN = 12' in chat_header
+    assert 'HEADER_VERTICAL_MARGIN = (HEADER_ROW_HEIGHT - ICON_BUTTON_SIZE) // 2' in chat_header
     assert 'HEADER_SPACING = 12' in chat_header
     assert 'ROW_HEIGHT = 23' in chat_header
     assert 'ICON_BUTTON_SIZE = 23' in chat_header
-    assert 'self.setFixedHeight(self.HEADER_HEIGHT)' not in chat_header
+    assert 'self.setFixedHeight(self.HEADER_HEIGHT)' in chat_header
     assert 'self.header_row.setObjectName("chatHeaderRow")' in chat_header
+    assert 'self.header_row.setFixedHeight(self.HEADER_ROW_HEIGHT)' in chat_header
+    assert 'self.HEADER_HORIZONTAL_MARGIN, self.HEADER_VERTICAL_MARGIN, self.HEADER_HORIZONTAL_MARGIN, self.HEADER_VERTICAL_MARGIN' in chat_header
     assert 'self.header_row_layout.setSpacing(self.HEADER_SPACING)' in chat_header
     assert 'self.badge_layout.setSpacing(self.HEADER_SPACING)' in chat_header
     assert 'self.history_button.setFixedSize(self.ICON_BUTTON_SIZE, self.ICON_BUTTON_SIZE)' in chat_header

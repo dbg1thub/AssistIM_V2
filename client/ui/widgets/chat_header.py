@@ -18,10 +18,14 @@ from client.ui.widgets.group_announcement_banner import GroupAnnouncementBanner
 class ChatHeader(QWidget):
     """Top bar showing current chat identity, status, and actions."""
 
-    HEADER_MARGIN = 12
+    HEADER_HEIGHT = 60
+    HEADER_DIVIDER_HEIGHT = 1
+    HEADER_ROW_HEIGHT = HEADER_HEIGHT - HEADER_DIVIDER_HEIGHT
+    HEADER_HORIZONTAL_MARGIN = 12
     HEADER_SPACING = 12
     ROW_HEIGHT = 23
     ICON_BUTTON_SIZE = 23
+    HEADER_VERTICAL_MARGIN = (HEADER_ROW_HEIGHT - ICON_BUTTON_SIZE) // 2
 
     history_clicked = Signal()
     info_clicked = Signal()
@@ -35,6 +39,7 @@ class ChatHeader(QWidget):
     def _setup_ui(self) -> None:
         self.setObjectName("chatHeader")
         self.setMinimumWidth(0)
+        self.setFixedHeight(self.HEADER_HEIGHT)
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -44,9 +49,10 @@ class ChatHeader(QWidget):
         self.header_row = QWidget(self)
         self.header_row.setObjectName("chatHeaderRow")
         self.header_row.setMinimumWidth(0)
+        self.header_row.setFixedHeight(self.HEADER_ROW_HEIGHT)
         self.header_row_layout = QHBoxLayout(self.header_row)
         self.header_row_layout.setContentsMargins(
-            self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN
+            self.HEADER_HORIZONTAL_MARGIN, self.HEADER_VERTICAL_MARGIN, self.HEADER_HORIZONTAL_MARGIN, self.HEADER_VERTICAL_MARGIN
         )
         self.header_row_layout.setSpacing(self.HEADER_SPACING)
 
