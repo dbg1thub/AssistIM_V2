@@ -927,23 +927,22 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assert "self.input_card_layout.addWidget(self.composer_widget, 1)" in setup_block
     assert "self.input_layout.addWidget(self.input_card, 1)" in setup_block
     assert "self.composer_shell_layout.addWidget(self.input_widget, 1)" in setup_block
-    assert "from client.ui.widgets.animated_stack import AnimatedStackWidget" in assistant_interface
-    assert "self.body_stack = AnimatedStackWidget(self.content_panel)" in setup_block
-    assert 'self.body_stack.setObjectName("aiAssistantBodyStack")' in setup_block
-    assert "self.body_stack.addWidget(self.empty_widget)" in setup_block
-    assert "self.body_stack.addWidget(self.message_list)" in setup_block
-    assert "self.content_layout.addWidget(self.body_stack, 1)" in setup_block
-    assert "self.content_layout.addWidget(self.empty_widget, 1)" not in setup_block
-    assert "self.content_layout.addWidget(self.message_list, 1)" not in setup_block
+    assert "from client.ui.widgets.animated_stack import AnimatedStackWidget" not in assistant_interface
+    assert "self.body_stack = AnimatedStackWidget(self.content_panel)" not in setup_block
+    assert 'self.body_stack.setObjectName("aiAssistantBodyStack")' not in setup_block
+    assert "self.body_stack.addWidget(self.empty_widget)" not in setup_block
+    assert "self.body_stack.addWidget(self.message_list)" not in setup_block
+    assert "self.content_layout.addWidget(self.body_stack, 1)" not in setup_block
+    assert "self.content_layout.addWidget(self.empty_widget, 1)" in setup_block
+    assert "self.content_layout.addWidget(self.message_list, 1)" in setup_block
     assert "self.content_layout.addWidget(self.input_safe_area)" not in setup_block
-    assert "self.body_stack.slide_to_widget(self.empty_widget, direction=\"right\")" in assistant_interface
-    assert "self.body_stack.slide_to_widget(self.message_list, direction=\"right\")" in assistant_interface
-    assert "self.message_list.hide()" not in assistant_interface
-    assert "self.empty_widget.show()" not in assistant_interface
-    assert "self.empty_widget.hide()" not in assistant_interface
-    assert "self.message_list.show()" not in assistant_interface
-    assert "content_rect = self.body_stack.geometry()" in layout_block
-    assert "content_rect = self.message_list.geometry() if self.message_list.isVisible() else self.empty_widget.geometry()" not in layout_block
+    assert "self.body_stack.slide_to_widget(" not in assistant_interface
+    assert "self.message_list.hide()" in assistant_interface
+    assert "self.empty_widget.show()" in assistant_interface
+    assert "self.empty_widget.hide()" in assistant_interface
+    assert "self.message_list.show()" in assistant_interface
+    assert "content_rect = self.body_stack.geometry()" not in layout_block
+    assert "content_rect = self.message_list.geometry() if self.message_list.isVisible() else self.empty_widget.geometry()" in layout_block
     assert "composer_width = content_rect.width()" in layout_block
     assert "composer_x = content_rect.x()" in layout_block
     assert "self.composer_shell.setGeometry(" in layout_block

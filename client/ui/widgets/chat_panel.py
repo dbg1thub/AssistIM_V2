@@ -26,7 +26,6 @@ from client.delegates.message_delegate import MessageDelegate
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, merge_sender_profile_extra
 from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
-from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
 from client.ui.widgets.fluent_scrollbar import (
@@ -309,8 +308,6 @@ class ChatPanel(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.stack = AnimatedStackWidget(self)
-
         self.welcome_widget = WelcomeWidget(self)
         self.chat_page = QWidget(self)
         self.chat_page.setObjectName("chatPage")
@@ -410,9 +407,8 @@ class ChatPanel(QWidget):
         self.chat_header.history_clicked.connect(self.chat_history_requested.emit)
         self.chat_header.info_clicked.connect(self.toggle_chat_info_drawer)
 
-        self.stack.addWidget(self.welcome_widget)
-        self.stack.addWidget(self.chat_page)
-        self.main_layout.addWidget(self.stack)
+        self.main_layout.addWidget(self.welcome_widget, 1)
+        self.main_layout.addWidget(self.chat_page, 1)
 
         self.show_welcome()
         StyleSheet.CHAT_PANEL.apply(self)
@@ -513,7 +509,7 @@ class ChatPanel(QWidget):
     def show_welcome(self) -> None:
         """Show welcome page and disable input."""
         self._current_session = None
-        self.stack.slide_to_widget(self.welcome_widget, direction="right")
+        self._show_welcome_page()
         if self._message_delegate:
             self._message_delegate.set_session(None)
         self.chat_header.set_group_announcement_session(None)
@@ -527,16 +523,27 @@ class ChatPanel(QWidget):
             self._chat_info_overlay.set_session(None)
             self._chat_info_overlay.close_drawer(immediate=True)
 
+    def _is_chat_page_visible(self) -> bool:
+        return self.chat_page.isVisible() and not self.welcome_widget.isVisible()
+
+    def _show_welcome_page(self) -> None:
+        self.chat_page.hide()
+        self.welcome_widget.show()
+
+    def _show_chat_page(self) -> None:
+        self.welcome_widget.hide()
+        self.chat_page.show()
+
     def show_chat(self) -> None:
         """Show active chat page and enable input."""
         session_id = str(getattr(self._current_session, "session_id", "") or "")
         logger.info(
-            "[chat-nav] chat_panel.show_chat session_id=%s stack_before=%s history_pending=%s",
+            "[chat-nav] chat_panel.show_chat session_id=%s page_before=%s history_pending=%s",
             session_id,
-            "chat_page" if self.stack.currentWidget() is self.chat_page else "welcome_widget",
+            "chat_page" if self._is_chat_page_visible() else "welcome_widget",
             self._history_request_pending,
         )
-        self.stack.slide_to_widget(self.chat_page, direction="right")
+        self._show_chat_page()
         self.message_input.set_session_active(True)
         self.message_input.focus_editor()
         if self._history_request_pending:
@@ -546,19 +553,19 @@ class ChatPanel(QWidget):
     def set_session(self, session: Session) -> None:
         """Update header and switch to active chat page."""
         previous_session_id = getattr(self._current_session, "session_id", None)
-        should_show_chat = previous_session_id != session.session_id or self.stack.currentWidget() is not self.chat_page
+        should_show_chat = previous_session_id != session.session_id or not self._is_chat_page_visible()
         if self._chat_info_overlay and previous_session_id and previous_session_id != session.session_id:
             self._chat_info_overlay.close_drawer(immediate=True)
         self._current_session = session
         layout_changed = bool(self._message_delegate and self._message_delegate.set_session(session))
         logger.info(
             "[chat-nav] chat_panel.set_session session_id=%s previous_session_id=%s should_show_chat=%s "
-            "layout_changed=%s stack_before=%s",
+            "layout_changed=%s page_before=%s",
             session.session_id,
             previous_session_id,
             should_show_chat,
             layout_changed,
-            "chat_page" if self.stack.currentWidget() is self.chat_page else "welcome_widget",
+            "chat_page" if self._is_chat_page_visible() else "welcome_widget",
         )
         show_group_announcement = session.group_announcement_needs_view()
         security_summary = session.security_summary()
@@ -1217,7 +1224,7 @@ class ChatPanel(QWidget):
     def set_history_loading(self, loading: bool) -> None:
         """Track whether an older-history request is in flight."""
         self._history_request_pending = loading
-        self._history_indicator.setVisible(loading and self.stack.currentWidget() is self.chat_page)
+        self._history_indicator.setVisible(loading and self._is_chat_page_visible())
         if loading:
             self._position_history_indicator()
 

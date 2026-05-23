@@ -1422,11 +1422,18 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
 
     assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
     assert 'chatFloatingComposerOverlay' not in chat_panel
-    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in chat_panel
-    assert 'self.stack = AnimatedStackWidget(self)' in chat_panel
+    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' not in chat_panel
+    assert 'self.stack = AnimatedStackWidget(self)' not in chat_panel
     assert 'self.stack = QStackedWidget(self)' not in chat_panel
-    assert 'self.stack.slide_to_widget(self.welcome_widget, direction="right")' in chat_panel
-    assert 'self.stack.slide_to_widget(self.chat_page, direction="right")' in chat_panel
+    assert 'self.stack.slide_to_widget(' not in chat_panel
+    assert 'self.main_layout.addWidget(self.welcome_widget, 1)' in chat_panel
+    assert 'self.main_layout.addWidget(self.chat_page, 1)' in chat_panel
+    assert 'def _show_welcome_page(self) -> None:' in chat_panel
+    assert 'self.welcome_widget.show()' in chat_panel
+    assert 'self.chat_page.hide()' in chat_panel
+    assert 'def _show_chat_page(self) -> None:' in chat_panel
+    assert 'self.welcome_widget.hide()' in chat_panel
+    assert 'self.chat_page.show()' in chat_panel
     assert 'FluentSplitter' not in chat_panel
     assert 'chatContentSplitter' not in chat_panel
     assert 'self.chat_content_area = QWidget(self.chat_page)' in chat_panel
