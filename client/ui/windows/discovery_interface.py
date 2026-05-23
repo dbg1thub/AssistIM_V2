@@ -30,6 +30,7 @@ from qfluentwidgets import (
     CardWidget,
     CheckBox,
     ComboBox,
+    IconWidget,
     InfoBar,
     isDarkTheme,
     LineEdit,
@@ -37,6 +38,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     ScrollArea,
+    SegmentedWidget,
     SubtitleLabel,
     TextEdit,
     TitleLabel,
@@ -67,6 +69,7 @@ from client.ui.controllers.discovery_controller import (
 )
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.image_viewer import ImageViewer
@@ -1544,7 +1547,7 @@ class EditMomentDialog(CreateMomentDialog):
         self.accept()
 
 
-class MomentCard(CardWidget):
+class MomentCard(QWidget):
     """Single moment card in the timeline."""
 
     like_requested = Signal(str, bool, int)
@@ -1561,7 +1564,6 @@ class MomentCard(CardWidget):
         self.moment = moment
         self._content_expanded = False
         self._image_dialogs: set[QDialog] = set()
-        self.setBorderRadius(8)
         self._setup_ui()
         self._apply_moment()
 
@@ -1816,7 +1818,7 @@ class MomentsNavItem(QFrame):
 
     clicked = Signal()
 
-    def __init__(self, text: str, parent=None, *, badge_text: str = ""):
+    def __init__(self, icon: AppIcon, text: str, parent=None, *, badge_text: str = ""):
         super().__init__(parent)
         self.setObjectName("MomentsNavItem")
         self.setProperty("active", False)
@@ -1824,8 +1826,12 @@ class MomentsNavItem(QFrame):
         self.setMinimumHeight(32)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(8)
+
+        self.icon_widget = IconWidget(icon, self)
+        self.icon_widget.setFixedSize(16, 16)
+        layout.addWidget(self.icon_widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.text_label = BodyLabel(text, self)
         self.text_label.setObjectName("momentsNavItemText")
@@ -1904,7 +1910,7 @@ class MomentsProfileBlock(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.cover_banner.setGeometry(0, 0, self.header_area.width(), 72)
-        self.identity_row.setGeometry(12, 52, max(0, self.width() - 24), 48)
+        self.identity_row.setGeometry(0, 52, self.header_area.width(), 48)
 
     def _create_stat_item(self, value: str, label: str) -> QWidget:
         item = QWidget(self)
@@ -1942,29 +1948,32 @@ class MomentsLeftPanel(QWidget):
 
         self.profile_block = MomentsProfileBlock(self)
         layout.addWidget(self.profile_block, 0)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
 
         self.nav_container = QWidget(self)
         self.nav_container.setObjectName("MomentsLeftNav")
         nav_layout = QVBoxLayout(self.nav_container)
         nav_layout.setContentsMargins(8, 10, 8, 10)
         nav_layout.setSpacing(4)
-        self._add_nav_item(nav_layout, "feed", tr("discovery.nav.feed", "Friends Feed"), active=True)
-        self._add_nav_item(nav_layout, "mine", tr("discovery.nav.mine", "My Moments"))
-        self._add_nav_item(nav_layout, "likes", tr("discovery.nav.likes", "My Likes"), badge_text="0")
+        self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
+        self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))
+        self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"), badge_text="0")
         nav_layout.addSpacing(8)
-        self._add_nav_item(nav_layout, "saved", tr("discovery.nav.saved", "Saved"))
-        self._add_nav_item(nav_layout, "albums", tr("discovery.nav.albums", "Albums"))
-        self._add_nav_item(nav_layout, "footprints", tr("discovery.nav.footprints", "Footprints"))
+        self._add_nav_item(nav_layout, "saved", AppIcon.FOLDER, tr("discovery.nav.saved", "Saved"))
+        self._add_nav_item(nav_layout, "albums", AppIcon.PHOTO, tr("discovery.nav.albums", "Albums"))
+        self._add_nav_item(nav_layout, "footprints", AppIcon.GLOBE, tr("discovery.nav.footprints", "Footprints"))
         nav_layout.addStretch(1)
         layout.addWidget(self.nav_container, 1)
 
         footer = QWidget(self)
         footer.setObjectName("MomentsLeftFooter")
         footer_layout = QVBoxLayout(footer)
-        footer_layout.setContentsMargins(8, 10, 8, 12)
-        footer_layout.setSpacing(0)
-        self.privacy_button = MomentsNavItem(tr("discovery.feed.privacy_button", "Moment Privacy"), footer)
+        footer_layout.setContentsMargins(0, 0, 0, 12)
+        footer_layout.setSpacing(10)
+        footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        self.privacy_button = MomentsNavItem(AppIcon.SETTING, tr("discovery.feed.privacy_button", "Moment Privacy"), footer)
         self.privacy_button.clicked.connect(self.privacy_requested.emit)
+        self.privacy_button.setContentsMargins(8, 0, 8, 0)
         footer_layout.addWidget(self.privacy_button)
         layout.addWidget(footer, 0)
 
@@ -1972,12 +1981,13 @@ class MomentsLeftPanel(QWidget):
         self,
         layout: QVBoxLayout,
         key: str,
+        icon: AppIcon,
         text: str,
         *,
         active: bool = False,
         badge_text: str = "",
     ) -> None:
-        item = MomentsNavItem(text, self.nav_container, badge_text=badge_text)
+        item = MomentsNavItem(icon, text, self.nav_container, badge_text=badge_text)
         item.clicked.connect(lambda key=key: self._set_active_nav(key))
         layout.addWidget(item)
         self._nav_items[key] = item
@@ -2001,7 +2011,7 @@ class MomentsFeedToolbar(QWidget):
         self.setObjectName("MomentsFeedToolbar")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 10)
+        layout.setContentsMargins(20, 12, 20, 12)
         layout.setSpacing(6)
 
         top_row = QHBoxLayout()
@@ -2012,24 +2022,13 @@ class MomentsFeedToolbar(QWidget):
         top_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         top_row.addStretch(1)
 
-        self.tab_container = QWidget(self)
-        self.tab_container.setObjectName("MomentsTabGroup")
-        tab_layout = QHBoxLayout(self.tab_container)
-        tab_layout.setContentsMargins(2, 2, 2, 2)
-        tab_layout.setSpacing(2)
-        self._tab_buttons: list[PushButton] = []
-        for index, label in enumerate((
-            tr("discovery.feed.tab_all", "All"),
-            tr("discovery.feed.tab_media", "Media"),
-            tr("discovery.feed.tab_links", "Links"),
-        )):
-            button = PushButton(label, self.tab_container)
-            button.setObjectName("MomentsTabButton")
-            button.setProperty("active", index == 0)
-            button.clicked.connect(lambda _checked=False, current=button: self._set_active_tab(current))
-            self._tab_buttons.append(button)
-            tab_layout.addWidget(button)
-        top_row.addWidget(self.tab_container, 0)
+        self.feed_filter = SegmentedWidget(self)
+        self.feed_filter.setObjectName("MomentsFeedFilter")
+        self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"), icon=AppIcon.HOME)
+        self.feed_filter.addItem(routeKey="media", text=tr("discovery.feed.tab_media", "Media"), onClick=lambda: self._set_active_filter("media"), icon=AppIcon.PHOTO)
+        self.feed_filter.addItem(routeKey="links", text=tr("discovery.feed.tab_links", "Links"), onClick=lambda: self._set_active_filter("links"), icon=AppIcon.ATTACH)
+        self.feed_filter.setCurrentItem("all")
+        top_row.addWidget(self.feed_filter, 0)
 
         self.refresh_button = TransparentToolButton(AppIcon.SYNC, self)
         self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
@@ -2042,17 +2041,8 @@ class MomentsFeedToolbar(QWidget):
         top_row.addWidget(self.notifications_button, 0)
         layout.addLayout(top_row)
 
-        self.summary_label = CaptionLabel(tr("discovery.feed.loading", "Loading moments..."), self)
-        self.summary_label.setObjectName("discoverySummaryLabel")
-        self.summary_label.setWordWrap(True)
-        layout.addWidget(self.summary_label)
-
-    def _set_active_tab(self, active_button: PushButton) -> None:
-        for button in self._tab_buttons:
-            button.setProperty("active", button is active_button)
-            button.style().unpolish(button)
-            button.style().polish(button)
-            button.update()
+    def _set_active_filter(self, route_key: str) -> None:
+        self.feed_filter.setCurrentItem(route_key)
 
 
 class MomentsComposePrompt(BodyLabel):
@@ -2100,6 +2090,9 @@ class MomentsComposeBar(QWidget):
         self.image_button = PushButton(tr("discovery.compose.image", "Image"), self)
         self.link_button = PushButton(tr("discovery.compose.link", "Link"), self)
         self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self)
+        self.image_button.setIcon(AppIcon.PHOTO.icon())
+        self.link_button.setIcon(AppIcon.ATTACH.icon())
+        self.publish_button.setIcon(AppIcon.SEND_FILL.icon())
         self.image_button.clicked.connect(self.image_requested.emit)
         self.link_button.clicked.connect(self.link_requested.emit)
         self.publish_button.clicked.connect(self.publish_requested.emit)
@@ -2132,8 +2125,8 @@ class MomentsFeedList(QWidget):
         self.feed_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.feed_container.setAutoFillBackground(False)
         self.feed_layout = QVBoxLayout(self.feed_container)
-        self.feed_layout.setContentsMargins(20, 16, 20, 28)
-        self.feed_layout.setSpacing(12)
+        self.feed_layout.setContentsMargins(0, 0, 0, 0)
+        self.feed_layout.setSpacing(0)
         self.scroll_area.setWidget(self.feed_container)
         layout.addWidget(self.scroll_area, 1)
 
@@ -2158,13 +2151,15 @@ class MomentsFeedPanel(QWidget):
         self.compose_bar = MomentsComposeBar(self)
         self.feed_list = MomentsFeedList(self)
         layout.addWidget(self.toolbar, 0)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
         layout.addWidget(self.compose_bar, 0)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
         layout.addWidget(self.feed_list, 1)
 
         self.refresh_button = self.toolbar.refresh_button
         self.notifications_button = self.toolbar.notifications_button
         self.publish_button = self.compose_bar.publish_button
-        self.summary_label = self.toolbar.summary_label
+        self.summary_label = None
         self.scroll_area = self.feed_list.scroll_area
         self.feed_container = self.feed_list.feed_container
         self.feed_layout = self.feed_list.feed_layout
@@ -2330,7 +2325,7 @@ class DiscoveryInterface(QWidget):
         self.notifications_button = self.feed_panel.notifications_button
         self.publish_button = self.feed_panel.publish_button
         self.privacy_button = self.left_panel.privacy_button
-        self.summary_label = self.feed_panel.summary_label
+        self.summary_label = None
 
         StyleSheet.DISCOVERY_INTERFACE.apply(self)
 
@@ -2363,25 +2358,14 @@ class DiscoveryInterface(QWidget):
 
     async def _reload_data_async(self) -> None:
         self.refresh_button.setEnabled(False)
-        self.summary_label.setText(tr("discovery.feed.syncing", "Syncing the moments feed..."))
         try:
             moments = await self._controller.load_moments()
         except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.summary_label.setText(tr("discovery.feed.load_failed", "Failed to load moments."))
             raise
         finally:
             self.refresh_button.setEnabled(True)
 
         self._moments = moments
-        self.summary_label.setText(
-            tr(
-                "discovery.feed.summary",
-                "{count} moments total. Click comment to expand the inline editor.",
-                count=len(self._moments),
-            )
-        )
         self._rebuild_feed()
 
     def _rebuild_feed(self) -> None:
@@ -2558,13 +2542,6 @@ class DiscoveryInterface(QWidget):
             self.publish_button.setEnabled(True)
 
         self._moments.insert(0, moment)
-        self.summary_label.setText(
-            tr(
-                "discovery.feed.summary",
-                "{count} moments total. Click comment to expand the inline editor.",
-                count=len(self._moments),
-            )
-        )
         self._rebuild_feed()
         self.scroll_area.verticalScrollBar().setValue(0)
         InfoBar.success(
@@ -2828,13 +2805,6 @@ class DiscoveryInterface(QWidget):
         """Remove one deleted moment from the feed backing records."""
         normalized_id = str(moment_id or "").strip()
         self._moments = [moment for moment in self._moments if moment.id != normalized_id]
-        self.summary_label.setText(
-            tr(
-                "discovery.feed.summary",
-                "{count} moments total. Click comment to expand the inline editor.",
-                count=len(self._moments),
-            )
-        )
         self._rebuild_feed()
 
     def _request_comment_delete(self, moment_id: str, comment_id: str) -> None:

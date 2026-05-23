@@ -406,6 +406,10 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
 def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
+    moment_card_block = discovery_interface.split('class MomentCard(QWidget):', 1)[1].split(
+        'class MomentsCoverBanner(QFrame):',
+        1,
+    )[0]
 
     assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in discovery_interface
     assert 'class MomentsLeftPanel(QWidget):' in discovery_interface
@@ -414,9 +418,13 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'class MomentsProfileBlock(QWidget):' in discovery_interface
     assert 'class MomentsCoverBanner(QFrame):' in discovery_interface
     assert 'class MomentsComposePrompt(BodyLabel):' in discovery_interface
-    assert 'self.identity_row.setGeometry(12, 52, max(0, self.width() - 24), 48)' in discovery_interface
+    assert 'from client.ui.widgets.fluent_divider import FluentDivider' in discovery_interface
+    assert 'self.identity_row.setGeometry(0, 52, self.header_area.width(), 48)' in discovery_interface
     assert 'self.input_prompt.clicked.connect(self.publish_requested.emit)' in discovery_interface
     assert 'self.input_prompt.mousePressEvent =' not in discovery_interface
+    assert 'MomentCard(CardWidget)' not in discovery_interface
+    assert 'class MomentCard(QWidget):' in discovery_interface
+    assert 'self.setBorderRadius(8)' not in moment_card_block
     assert 'self.splitter = FluentSplitter(Qt.Orientation.Horizontal, self)' in discovery_interface
     assert 'self.splitter.setObjectName("momentsSplitter")' in discovery_interface
     assert 'self.left_panel = MomentsLeftPanel(self.splitter)' in discovery_interface
@@ -429,14 +437,55 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.publish_button = self.feed_panel.publish_button' in discovery_interface
     assert 'self.privacy_button = self.left_panel.privacy_button' in discovery_interface
     assert 'self.notifications_button = self.feed_panel.notifications_button' in discovery_interface
+    assert 'self.summary_label = None' in discovery_interface
     assert 'self.feed_panel.publish_requested.connect(self._open_publish_dialog)' in discovery_interface
     assert 'self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)' in discovery_interface
     assert 'self.feed_panel.refresh_requested.connect(self.reload_data)' in discovery_interface
+    assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
+    assert 'footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL' in discovery_interface
+    assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
+    assert 'self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE' in discovery_interface
+    assert 'self.feed_filter = SegmentedWidget(self)' in discovery_interface
+    assert 'self.feed_filter.addItem(routeKey="all"' in discovery_interface
+    assert 'icon=AppIcon.HOME' in discovery_interface
+    assert 'icon=AppIcon.PHOTO' in discovery_interface
+    assert 'icon=AppIcon.ATTACH' in discovery_interface
+    assert 'self.image_button.setIcon(AppIcon.PHOTO.icon())' in discovery_interface
+    assert 'self.link_button.setIcon(AppIcon.ATTACH.icon())' in discovery_interface
+    assert 'self.publish_button.setIcon(AppIcon.SEND_FILL.icon())' in discovery_interface
     assert 'QWidget#MomentsLeftPanel' in qss
     assert 'QWidget#MomentsFeedPanel' in qss
     assert 'QWidget#MomentsRightPanel' in qss
     assert 'QFrame#MomentsCoverBanner' in qss
     assert 'QSplitter#momentsSplitter' in qss
+    assert 'QSplitter#momentsSplitter {\n    background: transparent;' in qss
+    assert 'QFrame#MomentsNavItem:hover' in qss
+    assert 'border-radius: 0px;' in qss
+    assert 'QWidget#MomentCard' in qss
+    assert 'QWidget#MomentCard:hover' not in qss
+    assert 'QLabel#discoverySummaryLabel' not in qss
+
+
+def test_discovery_redesign_i18n_resources_are_localized() -> None:
+    zh_cn = json.loads(Path('client/resources/i18n/zh-CN.json').read_text(encoding='utf-8'))
+    en_us = json.loads(Path('client/resources/i18n/en-US.json').read_text(encoding='utf-8'))
+    ko_kr = json.loads(Path('client/resources/i18n/ko-KR.json').read_text(encoding='utf-8'))
+
+    assert zh_cn['discovery.feed.title'] == '好友动态'
+    assert zh_cn['discovery.nav.feed'] == '好友动态'
+    assert zh_cn['discovery.feed.tab_all'] == '全部'
+    assert zh_cn['discovery.feed.tab_media'] == '媒体'
+    assert zh_cn['discovery.feed.tab_links'] == '链接'
+    assert zh_cn['discovery.compose.image'] == '图片'
+    assert zh_cn['discovery.compose.link'] == '链接'
+    assert zh_cn['discovery.compose.placeholder'] == '分享新鲜事...'
+    assert zh_cn['discovery.profile.name_placeholder'] == '我'
+    assert zh_cn['discovery.sidebar.ai_digest'] == 'AI 今日摘要'
+    assert zh_cn['discovery.sidebar.online'] == '在线好友'
+    assert zh_cn['discovery.sidebar.topics'] == '热门话题'
+    assert zh_cn['discovery.sidebar.suggestions'] == '可能认识的人'
+    assert en_us['discovery.feed.title'] == 'Friends Feed'
+    assert ko_kr['discovery.feed.title'] == '친구 소식'
 
 
 def test_discovery_media_grid_loads_remote_media_with_auth_header() -> None:

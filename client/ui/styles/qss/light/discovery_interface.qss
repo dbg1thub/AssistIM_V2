@@ -10,7 +10,7 @@ QWidget#MomentsRightContent {
 }
 
 QSplitter#momentsSplitter {
-    background: {{SURFACE_BG}};
+    background: transparent;
     border: none;
 }
 
@@ -29,7 +29,8 @@ QWidget#MomentsRightPanel {
 }
 
 QWidget#MomentsProfileBlock {
-    border-bottom: 1px solid {{BORDER_COLOR}};
+    background: transparent;
+    border: none;
 }
 
 QFrame#MomentsCoverBanner {
@@ -60,18 +61,19 @@ QLabel#MomentsProfileStatValue {
 }
 
 QWidget#MomentsLeftFooter {
-    border-top: 1px solid {{BORDER_COLOR}};
+    background: transparent;
+    border: none;
 }
 
 QFrame#MomentsNavItem {
     background: transparent;
     border: none;
-    border-radius: {{RADIUS_CARD}};
+    border-radius: 0px;
 }
 
 QFrame#MomentsNavItem:hover,
 QFrame#MomentsNavItem[active="true"] {
-    background: {{CARD_BG_STRONG}};
+    background: rgba(0, 0, 0, 10);
 }
 
 QLabel#momentsNavItemText {
@@ -94,28 +96,12 @@ QLabel#momentsNavBadge {
 QWidget#MomentsFeedToolbar,
 QWidget#MomentsComposeBar {
     background: {{CARD_BG_STRONG}};
-    border-bottom: 1px solid {{BORDER_COLOR}};
+    border: none;
 }
 
-QWidget#MomentsTabGroup {
-    background: {{SURFACE_BG}};
-    border: 1px solid {{BORDER_COLOR}};
-    border-radius: {{RADIUS_CARD}};
-}
-
-QPushButton#MomentsTabButton {
+SegmentedWidget#MomentsFeedFilter {
     background: transparent;
     border: none;
-    border-radius: 6px;
-    padding: 4px 10px;
-    color: {{TEXT_SECONDARY}};
-}
-
-QPushButton#MomentsTabButton[active="true"] {
-    background: {{CARD_BG_STRONG}};
-    border: 1px solid {{BORDER_COLOR}};
-    color: {{TEXT_PRIMARY}};
-    font-weight: 600;
 }
 
 QLabel#MomentsComposeInput {
@@ -142,11 +128,10 @@ QFrame#MomentsDigestCard {
     border-radius: {{RADIUS_CARD}};
 }
 
-QWidget#DiscoveryHeroCard,
 QWidget#MomentCard {
     background: {{CARD_BG_STRONG}};
-    border: 1px solid {{BORDER_COLOR_STRONG}};
-    border-radius: {{RADIUS_CARD}};
+    border: none;
+    border-radius: 0px;
 }
 
 BodyLabel#momentContentLabel {
@@ -167,8 +152,7 @@ QFrame#MomentCommentSurface {
 }
 
 QLabel#momentCommentTimeLabel,
-QLabel#momentStatsLabel,
-QLabel#discoverySummaryLabel {
+QLabel#momentStatsLabel {
     color: {{TEXT_SECONDARY}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
