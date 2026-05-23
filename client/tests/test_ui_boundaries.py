@@ -427,6 +427,7 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.setBorderRadius(8)' not in moment_card_block
     assert 'self.splitter = FluentSplitter(Qt.Orientation.Horizontal, self)' in discovery_interface
     assert 'self.splitter.setObjectName("momentsSplitter")' in discovery_interface
+    assert 'self.splitter.setHandleWidth(1)' in discovery_interface
     assert 'self.left_panel = MomentsLeftPanel(self.splitter)' in discovery_interface
     assert 'self.feed_panel = MomentsFeedPanel(self.splitter)' in discovery_interface
     assert 'self.right_panel = MomentsRightPanel(self.splitter)' in discovery_interface
@@ -445,22 +446,31 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
     assert 'self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE' in discovery_interface
+    assert 'nav_layout.setContentsMargins(0, 0, 0, 0)' in discovery_interface
+    assert 'nav_layout.setSpacing(0)' in discovery_interface
     assert 'self.feed_filter = SegmentedWidget(self)' in discovery_interface
     assert 'self.feed_filter.addItem(routeKey="all"' in discovery_interface
-    assert 'icon=AppIcon.HOME' in discovery_interface
-    assert 'icon=AppIcon.PHOTO' in discovery_interface
-    assert 'icon=AppIcon.ATTACH' in discovery_interface
+    assert 'self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"))' in discovery_interface
+    assert 'icon=AppIcon.HOME' not in discovery_interface
+    assert 'icon=AppIcon.PHOTO' not in discovery_interface
+    assert 'icon=AppIcon.ATTACH' not in discovery_interface
     assert 'self.image_button.setIcon(AppIcon.PHOTO.icon())' in discovery_interface
     assert 'self.link_button.setIcon(AppIcon.ATTACH.icon())' in discovery_interface
     assert 'self.publish_button.setIcon(AppIcon.SEND_FILL.icon())' in discovery_interface
+    assert 'content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL' in discovery_interface
+    assert 'self.feed_layout.addWidget(FluentDivider(self.feed_container, variant=FluentDivider.FULL' in discovery_interface
     assert 'QWidget#MomentsLeftPanel' in qss
     assert 'QWidget#MomentsFeedPanel' in qss
     assert 'QWidget#MomentsRightPanel' in qss
     assert 'QFrame#MomentsCoverBanner' in qss
     assert 'QSplitter#momentsSplitter' in qss
     assert 'QSplitter#momentsSplitter {\n    background: transparent;' in qss
+    assert 'QSplitter#momentsSplitter::handle:horizontal' in qss
     assert 'QFrame#MomentsNavItem:hover' in qss
     assert 'border-radius: 0px;' in qss
+    assert 'QFrame#MomentsNavItem[active="true"] QLabel#momentsNavItemText' not in qss
+    assert 'QLabel#momentsNavBadge {\n    background: {{SURFACE_BG}};\n    color: {{TEXT_PRIMARY}};' in qss
+    assert 'QFrame#MomentsRightSection {\n    border-bottom:' not in qss
     assert 'QWidget#MomentCard' in qss
     assert 'QWidget#MomentCard:hover' not in qss
     assert 'QLabel#discoverySummaryLabel' not in qss
@@ -472,6 +482,7 @@ def test_discovery_redesign_i18n_resources_are_localized() -> None:
     ko_kr = json.loads(Path('client/resources/i18n/ko-KR.json').read_text(encoding='utf-8'))
 
     assert zh_cn['discovery.feed.title'] == '好友动态'
+    assert zh_cn['discovery.feed.publish_button'] == '发布'
     assert zh_cn['discovery.nav.feed'] == '好友动态'
     assert zh_cn['discovery.feed.tab_all'] == '全部'
     assert zh_cn['discovery.feed.tab_media'] == '媒体'
@@ -485,7 +496,9 @@ def test_discovery_redesign_i18n_resources_are_localized() -> None:
     assert zh_cn['discovery.sidebar.topics'] == '热门话题'
     assert zh_cn['discovery.sidebar.suggestions'] == '可能认识的人'
     assert en_us['discovery.feed.title'] == 'Friends Feed'
+    assert en_us['discovery.feed.publish_button'] == 'Publish'
     assert ko_kr['discovery.feed.title'] == '친구 소식'
+    assert ko_kr['discovery.feed.publish_button'] == '게시'
 
 
 def test_discovery_media_grid_loads_remote_media_with_auth_header() -> None:

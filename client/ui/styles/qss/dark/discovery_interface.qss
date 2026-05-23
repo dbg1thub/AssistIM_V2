@@ -14,9 +14,15 @@ QSplitter#momentsSplitter {
     border: none;
 }
 
+QSplitter#momentsSplitter::handle:horizontal {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
 QWidget#MomentsLeftPanel {
     background: {{SURFACE_BG}};
-    border-right: 1px solid {{BORDER_COLOR}};
+    border: none;
 }
 
 QWidget#MomentsFeedPanel {
@@ -25,7 +31,7 @@ QWidget#MomentsFeedPanel {
 
 QWidget#MomentsRightPanel {
     background: {{CARD_BG_STRONG}};
-    border-left: 1px solid {{BORDER_COLOR}};
+    border: none;
 }
 
 QWidget#MomentsProfileBlock {
@@ -81,14 +87,10 @@ QLabel#momentsNavItemText {
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QFrame#MomentsNavItem[active="true"] QLabel#momentsNavItemText {
-    color: {{TEXT_PRIMARY}};
-    font: 600 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
-}
-
 QLabel#momentsNavBadge {
-    background: #e24b4a;
-    color: #ffffff;
+    background: {{SURFACE_BG}};
+    color: {{TEXT_PRIMARY}};
+    border: 1px solid {{BORDER_COLOR}};
     border-radius: 8px;
     padding: 1px 6px;
 }
@@ -110,10 +112,6 @@ QLabel#MomentsComposeInput {
     border-radius: {{RADIUS_CARD}};
     padding: 7px 12px;
     color: {{TEXT_SECONDARY}};
-}
-
-QFrame#MomentsRightSection {
-    border-bottom: 1px solid {{BORDER_COLOR}};
 }
 
 QLabel#MomentsRightSectionTitle,

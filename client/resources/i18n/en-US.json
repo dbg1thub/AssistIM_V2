@@ -800,7 +800,7 @@
   "discovery.feed.title": "Friends Feed",
   "discovery.feed.subtitle": "Share updates, browse what's new, and keep the conversation going in comments.",
   "discovery.feed.refresh_tooltip": "Refresh feed",
-  "discovery.feed.publish_button": "Publish Moment",
+  "discovery.feed.publish_button": "Publish",
   "discovery.feed.loading": "Loading moments...",
   "discovery.feed.syncing": "Syncing the moments feed...",
   "discovery.feed.load_failed": "Failed to load moments.",

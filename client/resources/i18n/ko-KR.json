@@ -727,7 +727,7 @@
   "discovery.feed.title": "친구 소식",
   "discovery.feed.subtitle": "근황을 공유하고, 새 소식을 둘러보며, 댓글로 대화를 이어가세요.",
   "discovery.feed.refresh_tooltip": "피드 새로고침",
-  "discovery.feed.publish_button": "모먼트 게시",
+  "discovery.feed.publish_button": "게시",
   "discovery.feed.loading": "모먼트를 불러오는 중...",
   "discovery.feed.syncing": "모먼트 피드를 동기화하는 중...",
   "discovery.feed.load_failed": "모먼트를 불러오지 못했습니다.",

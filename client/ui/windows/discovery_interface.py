@@ -1953,8 +1953,8 @@ class MomentsLeftPanel(QWidget):
         self.nav_container = QWidget(self)
         self.nav_container.setObjectName("MomentsLeftNav")
         nav_layout = QVBoxLayout(self.nav_container)
-        nav_layout.setContentsMargins(8, 10, 8, 10)
-        nav_layout.setSpacing(4)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
         self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
         self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))
         self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"), badge_text="0")
@@ -1968,12 +1968,11 @@ class MomentsLeftPanel(QWidget):
         footer = QWidget(self)
         footer.setObjectName("MomentsLeftFooter")
         footer_layout = QVBoxLayout(footer)
-        footer_layout.setContentsMargins(0, 0, 0, 12)
-        footer_layout.setSpacing(10)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(0)
         footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
         self.privacy_button = MomentsNavItem(AppIcon.SETTING, tr("discovery.feed.privacy_button", "Moment Privacy"), footer)
         self.privacy_button.clicked.connect(self.privacy_requested.emit)
-        self.privacy_button.setContentsMargins(8, 0, 8, 0)
         footer_layout.addWidget(self.privacy_button)
         layout.addWidget(footer, 0)
 
@@ -2024,9 +2023,9 @@ class MomentsFeedToolbar(QWidget):
 
         self.feed_filter = SegmentedWidget(self)
         self.feed_filter.setObjectName("MomentsFeedFilter")
-        self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"), icon=AppIcon.HOME)
-        self.feed_filter.addItem(routeKey="media", text=tr("discovery.feed.tab_media", "Media"), onClick=lambda: self._set_active_filter("media"), icon=AppIcon.PHOTO)
-        self.feed_filter.addItem(routeKey="links", text=tr("discovery.feed.tab_links", "Links"), onClick=lambda: self._set_active_filter("links"), icon=AppIcon.ATTACH)
+        self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"))
+        self.feed_filter.addItem(routeKey="media", text=tr("discovery.feed.tab_media", "Media"), onClick=lambda: self._set_active_filter("media"))
+        self.feed_filter.addItem(routeKey="links", text=tr("discovery.feed.tab_links", "Links"), onClick=lambda: self._set_active_filter("links"))
         self.feed_filter.setCurrentItem("all")
         top_row.addWidget(self.feed_filter, 0)
 
@@ -2089,7 +2088,7 @@ class MomentsComposeBar(QWidget):
 
         self.image_button = PushButton(tr("discovery.compose.image", "Image"), self)
         self.link_button = PushButton(tr("discovery.compose.link", "Link"), self)
-        self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self)
+        self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish"), self)
         self.image_button.setIcon(AppIcon.PHOTO.icon())
         self.link_button.setIcon(AppIcon.ATTACH.icon())
         self.publish_button.setIcon(AppIcon.SEND_FILL.icon())
@@ -2191,28 +2190,34 @@ class MomentsRightPanel(QWidget):
         self.content = QWidget(self.scroll_area)
         self.content.setObjectName("MomentsRightContent")
         content_layout = QVBoxLayout(self.content)
-        content_layout.setContentsMargins(16, 14, 16, 18)
-        content_layout.setSpacing(12)
-        content_layout.addWidget(self._create_digest_section())
-        content_layout.addWidget(self._create_list_section(
-            tr("discovery.sidebar.online", "Online Friends"),
-            [
-                tr("discovery.sidebar.online_placeholder_1", "Friends who just posted will appear here."),
-                tr("discovery.sidebar.online_placeholder_2", "Online status is reserved for later."),
-            ],
-        ))
-        content_layout.addWidget(self._create_list_section(
-            tr("discovery.sidebar.topics", "Hot Topics"),
-            [
-                tr("discovery.sidebar.topic_placeholder_1", "Product updates"),
-                tr("discovery.sidebar.topic_placeholder_2", "Local AI"),
-                tr("discovery.sidebar.topic_placeholder_3", "UI design"),
-            ],
-        ))
-        content_layout.addWidget(self._create_list_section(
-            tr("discovery.sidebar.suggestions", "People You May Know"),
-            [tr("discovery.sidebar.suggestions_placeholder", "Suggestions will be shown here.")],
-        ))
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        sections = [
+            self._create_digest_section(),
+            self._create_list_section(
+                tr("discovery.sidebar.online", "Online Friends"),
+                [
+                    tr("discovery.sidebar.online_placeholder_1", "Friends who just posted will appear here."),
+                    tr("discovery.sidebar.online_placeholder_2", "Online status is reserved for later."),
+                ],
+            ),
+            self._create_list_section(
+                tr("discovery.sidebar.topics", "Hot Topics"),
+                [
+                    tr("discovery.sidebar.topic_placeholder_1", "Product updates"),
+                    tr("discovery.sidebar.topic_placeholder_2", "Local AI"),
+                    tr("discovery.sidebar.topic_placeholder_3", "UI design"),
+                ],
+            ),
+            self._create_list_section(
+                tr("discovery.sidebar.suggestions", "People You May Know"),
+                [tr("discovery.sidebar.suggestions_placeholder", "Suggestions will be shown here.")],
+            ),
+        ]
+        for index, section in enumerate(sections):
+            content_layout.addWidget(section)
+            if index < len(sections) - 1:
+                content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
         content_layout.addStretch(1)
         self.scroll_area.setWidget(self.content)
         layout.addWidget(self.scroll_area, 1)
@@ -2252,7 +2257,7 @@ class MomentsRightPanel(QWidget):
         section = QFrame(self.content if hasattr(self, "content") else self)
         section.setObjectName("MomentsRightSection")
         layout = QVBoxLayout(section)
-        layout.setContentsMargins(0, 0, 0, 12)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
         title_label = CaptionLabel(title, section)
         title_label.setObjectName("MomentsRightSectionTitle")
@@ -2316,6 +2321,7 @@ class DiscoveryInterface(QWidget):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
         self.splitter.setSizes([200, 720, 240])
+        self.splitter.setHandleWidth(1)
         main_layout.addWidget(self.splitter)
 
         self.scroll_area = self.feed_panel.scroll_area
@@ -2385,6 +2391,7 @@ class DiscoveryInterface(QWidget):
             card.delete_requested.connect(self._request_moment_delete)
             card.comment_delete_requested.connect(self._request_comment_delete)
             self.feed_layout.addWidget(card)
+            self.feed_layout.addWidget(FluentDivider(self.feed_container, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
             self._cards[moment.id] = card
 
         self.feed_layout.addStretch(1)

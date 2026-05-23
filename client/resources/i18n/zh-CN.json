@@ -815,7 +815,7 @@
   "discovery.feed.title": "好友动态",
   "discovery.feed.subtitle": "分享动态、浏览近况，并在评论里继续互动。",
   "discovery.feed.refresh_tooltip": "刷新动态",
-  "discovery.feed.publish_button": "发布动态",
+  "discovery.feed.publish_button": "发布",
   "discovery.feed.loading": "正在加载动态…",
   "discovery.feed.syncing": "正在同步朋友圈动态…",
   "discovery.feed.load_failed": "动态加载失败",
