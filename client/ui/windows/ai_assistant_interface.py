@@ -52,6 +52,7 @@ from client.managers.ai_action_workflow import AIActionWorkflow
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
+from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.fluent_scrollbar import FluentOverlayScrollBar, FluentOverlayScrollBarDisplayMode, attach_fluent_scrollbar
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
@@ -318,6 +319,9 @@ class AIAssistantInterface(QWidget):
         )
         self.empty_layout.addWidget(self.empty_placeholder, 1)
 
+        self.body_stack = AnimatedStackWidget(self.content_panel)
+        self.body_stack.setObjectName("aiAssistantBodyStack")
+
         self.composer_shell = QFrame(self.content_panel)
         self.composer_shell.setObjectName("aiAssistantComposerShell")
         self.composer_shell.setMinimumWidth(0)
@@ -425,9 +429,9 @@ class AIAssistantInterface(QWidget):
         self.header_divider = FluentDivider(self.content_panel, variant=FluentDivider.FULL)
         self.content_layout.addWidget(self.header)
         self.content_layout.addWidget(self.header_divider)
-        self.content_layout.addWidget(self.empty_widget, 1)
-        self.content_layout.addWidget(self.message_list, 1)
-        self.message_list.hide()
+        self.body_stack.addWidget(self.empty_widget)
+        self.body_stack.addWidget(self.message_list)
+        self.content_layout.addWidget(self.body_stack, 1)
 
         self.scroll_to_bottom_button = PrimaryPushButton(
             tr("ai_assistant.scroll_to_bottom", "Scroll to bottom"),
@@ -701,12 +705,10 @@ class AIAssistantInterface(QWidget):
         if self._message_model is not None:
             self._message_model.set_messages(self._messages)
         if not self._messages:
-            self.message_list.hide()
-            self.empty_widget.show()
+            self.body_stack.slide_to_widget(self.empty_widget, direction="right")
             self._schedule_single_shot(self._update_input_overlay_positions)
             return
-        self.empty_widget.hide()
-        self.message_list.show()
+        self.body_stack.slide_to_widget(self.message_list, direction="right")
         if self._message_delegate is not None:
             self._message_delegate.clear_text_selection(self.message_list)
         self._schedule_single_shot(self._update_input_overlay_positions)
@@ -714,9 +716,8 @@ class AIAssistantInterface(QWidget):
 
     def _append_message(self, message: AIMessage) -> None:
         self._messages.append(message)
-        if self.empty_widget.isVisible():
-            self.empty_widget.hide()
-            self.message_list.show()
+        if self.body_stack.currentWidget() is self.empty_widget:
+            self.body_stack.slide_to_widget(self.message_list, direction="right")
         if self._message_model is not None:
             self._message_model.add_message(message)
         self._scroll_to_bottom()
@@ -1470,7 +1471,7 @@ class AIAssistantInterface(QWidget):
         if not panel_rect.isValid():
             return
 
-        content_rect = self.message_list.geometry() if self.message_list.isVisible() else self.empty_widget.geometry()
+        content_rect = self.body_stack.geometry()
         if not content_rect.isValid():
             content_rect = panel_rect.adjusted(0, self.header.height(), 0, 0)
 
