@@ -69,6 +69,7 @@ from client.ui.controllers.discovery_controller import (
     MomentRecord,
     get_discovery_controller,
 )
+from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
 from client.ui.widgets.animated_stack import AnimatedStackWidget
@@ -127,6 +128,26 @@ def _apply_safe_button_font(*buttons: TransparentToolButton) -> None:
 
     for button in buttons:
         button.setFont(font)
+
+
+def _current_user_display_name(user: dict | None) -> str:
+    """Return the visible display name for the authenticated user."""
+    data = dict(user or {})
+    return (
+        str(data.get("nickname", "") or "").strip()
+        or str(data.get("username", "") or "").strip()
+        or str(data.get("id", "") or "").strip()
+        or tr("profile.placeholder.name", "Not Signed In")
+    )
+
+
+def _current_user_avatar_seed(user: dict | None, display_name: str) -> str:
+    data = dict(user or {})
+    return profile_avatar_seed(
+        user_id=data.get("id", ""),
+        username=data.get("username", ""),
+        display_name=display_name,
+    )
 
 
 def _prepare_transparent_scroll_area(area: ScrollArea) -> None:
@@ -1977,13 +1998,12 @@ class MomentsProfileBlock(QWidget):
         identity_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.avatar = DiscoveryAvatar(40, self.identity_row)
-        self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
         identity_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
 
         text_column = QVBoxLayout()
         text_column.setContentsMargins(0, 0, 0, 0)
         text_column.setSpacing(2)
-        self.name_label = BodyLabel(tr("discovery.profile.name_placeholder", "Me"), self.identity_row)
+        self.name_label = BodyLabel("", self.identity_row)
         self.name_label.setObjectName("MomentsProfileNameLabel")
         self.bio_label = CaptionLabel(
             tr("discovery.profile.bio_placeholder", "Share your moments"),
@@ -2004,6 +2024,23 @@ class MomentsProfileBlock(QWidget):
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.friends", "Friends")))
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.likes", "Likes")))
         root_layout.addLayout(stats_row)
+
+        self.set_current_user(None)
+
+    def set_current_user(self, user: dict | None) -> None:
+        display_name = _current_user_display_name(user)
+        data = dict(user or {})
+        self.avatar.set_avatar(
+            str(data.get("avatar", "") or ""),
+            fallback=display_name,
+            gender=str(data.get("gender", "") or ""),
+            seed=_current_user_avatar_seed(data, display_name),
+        )
+        self.name_label.setText(display_name)
+        self.bio_label.setText(
+            str(data.get("signature", "") or "").strip()
+            or tr("discovery.profile.bio_placeholder", "Share your moments")
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2188,7 +2225,6 @@ class MomentsComposeBar(QWidget):
         layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.avatar = DiscoveryAvatar(32, self)
-        self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.input_prompt = MomentsComposePrompt(tr("discovery.compose.placeholder", "Share what is happening..."), self)
@@ -2208,6 +2244,18 @@ class MomentsComposeBar(QWidget):
         layout.addWidget(self.image_button, 0)
         layout.addWidget(self.link_button, 0)
         layout.addWidget(self.publish_button, 0)
+
+        self.set_current_user(None)
+
+    def set_current_user(self, user: dict | None) -> None:
+        display_name = _current_user_display_name(user)
+        data = dict(user or {})
+        self.avatar.set_avatar(
+            str(data.get("avatar", "") or ""),
+            fallback=display_name,
+            gender=str(data.get("gender", "") or ""),
+            seed=_current_user_avatar_seed(data, display_name),
+        )
 
 
 class MomentsFeedList(QWidget):
@@ -2314,6 +2362,9 @@ class MomentsFeedPage(QWidget):
 
         self.toolbar.filter_changed.connect(self.switch_filter)
 
+    def set_current_user(self, user: dict | None) -> None:
+        self.compose_bar.set_current_user(user)
+
     def switch_filter(self, route_key: str) -> None:
         page_map = {
             "all": self.all_feed_list,
@@ -2389,6 +2440,9 @@ class MomentsFeedPanel(QWidget):
         self.friends_feed_page.compose_bar.publish_requested.connect(self.publish_requested.emit)
         self.friends_feed_page.compose_bar.image_requested.connect(self.publish_requested.emit)
         self.friends_feed_page.compose_bar.link_requested.connect(self.publish_requested.emit)
+
+    def set_current_user(self, user: dict | None) -> None:
+        self.friends_feed_page.set_current_user(user)
 
     def switch_page(self, route_key: str) -> None:
         page_map: dict[str, QWidget] = {
@@ -2513,6 +2567,7 @@ class DiscoveryInterface(QWidget):
         self.setObjectName("DiscoveryInterface")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAutoFillBackground(False)
+        self._auth_controller = get_auth_controller()
         self._controller = get_discovery_controller()
         self._contact_controller = get_contact_controller()
         self._event_bus = get_event_bus()
@@ -2528,6 +2583,7 @@ class DiscoveryInterface(QWidget):
         self._teardown_started = False
 
         self._setup_ui()
+        self._sync_current_user(self._auth_controller.current_user)
         self._connect_signals()
         self.destroyed.connect(self._on_destroyed)
 
@@ -2574,6 +2630,13 @@ class DiscoveryInterface(QWidget):
         self.summary_label = None
 
         StyleSheet.DISCOVERY_INTERFACE.apply(self)
+
+    def sync_current_user(self, user: dict | None) -> None:
+        self._sync_current_user(user)
+
+    def _sync_current_user(self, user: dict | None) -> None:
+        self.left_panel.profile_block.set_current_user(user)
+        self.feed_panel.set_current_user(user)
 
     def _connect_signals(self) -> None:
         self.feed_panel.refresh_requested.connect(self.reload_data)

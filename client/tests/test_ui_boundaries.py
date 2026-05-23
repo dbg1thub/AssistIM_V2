@@ -528,6 +528,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)' in discovery_interface
     assert 'self.feed_panel.refresh_requested.connect(self.reload_data)' in discovery_interface
     assert 'self.left_panel.nav_changed.connect(self.feed_panel.switch_page)' in discovery_interface
+    assert 'from client.ui.controllers.auth_controller import get_auth_controller' in discovery_interface
+    assert 'self._auth_controller = get_auth_controller()' in discovery_interface
+    assert 'self._sync_current_user(self._auth_controller.current_user)' in discovery_interface
+    assert 'def sync_current_user(self, user: dict | None) -> None:' in discovery_interface
+    assert 'self.left_panel.profile_block.set_current_user(user)' in discovery_interface
+    assert 'self.feed_panel.set_current_user(user)' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
     assert 'footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
@@ -539,6 +545,17 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'layout.setSpacing(0)' in left_panel_block
     assert 'layout.setContentsMargins(0, 0, 0, 0)' in feed_panel_block
     assert 'layout.setSpacing(0)' in feed_panel_block
+    assert 'def set_current_user(self, user: dict | None) -> None:' in profile_block
+    assert 'display_name = _current_user_display_name(user)' in profile_block
+    assert 'self.avatar.set_avatar(' in profile_block
+    assert 'fallback=display_name' in profile_block
+    assert 'self.name_label.setText(display_name)' in profile_block
+    assert 'def set_current_user(self, user: dict | None) -> None:' in compose_bar_block
+    assert 'display_name = _current_user_display_name(user)' in compose_bar_block
+    assert 'self.avatar.set_avatar(' in compose_bar_block
+    assert 'fallback=display_name' in compose_bar_block
+    assert 'discovery.profile.avatar_fallback' not in profile_block
+    assert 'discovery.profile.avatar_fallback' not in compose_bar_block
     assert 'self.page_stack = AnimatedStackWidget(self)' in feed_panel_block
     assert 'self.friends_feed_page = MomentsFeedPage(self.page_stack)' in feed_panel_block
     assert 'self.my_moments_page = MomentsPlaceholderPage(' in feed_panel_block

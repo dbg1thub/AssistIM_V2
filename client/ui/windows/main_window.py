@@ -355,6 +355,7 @@ class MainWindow(FluentWindow):
         user = dict(payload or {})
         self._sync_user_card(user)
         self.contact_interface.refresh_profile_related_slices()
+        self.discovery_interface.sync_current_user(user)
 
     def _on_avatar_ready(self, source: str) -> None:
         """Refresh the sidebar user avatar when a remote image finishes downloading."""
