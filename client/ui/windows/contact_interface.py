@@ -8,7 +8,20 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QEasingCurve,
+    QPoint,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
@@ -17,6 +30,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    FluentIcon,
     FluentStyleSheet,
     IconWidget,
     InfoBar,
@@ -36,7 +50,9 @@ from qfluentwidgets import (
     themeColor,
 )
 from qframelesswindow.titlebar import CloseButton
+from qframelesswindow.titlebar.title_bar_buttons import MinimizeButton, TitleBarButton
 from shiboken6 import isValid as is_valid_qt_object
+from qfluentwidgets.common.icon import drawIcon
 
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core import logging
@@ -976,18 +992,67 @@ class GalleryContactDetailPanel(QWidget):
             button.setEnabled(available)
 
 
+class FriendMomentsBackButton(TitleBarButton):
+    """Title-bar back button with a rounded top-left hover surface."""
+
+    def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0, int(corner_radius or 0))
+        self.setIconSize(QSize(16, 16))
+
+    def _background_path(self) -> QPainterPath:
+        rect = QRectF(self.rect())
+        radius = min(float(self._corner_radius), rect.width(), rect.height())
+        path = QPainterPath()
+        path.moveTo(rect.left() + radius, rect.top())
+        path.lineTo(rect.right(), rect.top())
+        path.lineTo(rect.right(), rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        path.lineTo(rect.left(), rect.top() + radius)
+        path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        color, bg_color = self._getColors()
+
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(self._background_path())
+
+        icon_size = self.iconSize()
+        icon_rect = QRectF(
+            (self.width() - icon_size.width()) / 2,
+            (self.height() - icon_size.height()) / 2,
+            icon_size.width(),
+            icon_size.height(),
+        )
+        drawIcon(FluentIcon.RETURN, painter, icon_rect, fill=color.name())
+
+
 class FriendMomentsDialog(FluentDialog):
     """Placeholder dialog for one friend's moments timeline."""
 
     DIALOG_WIDTH = 620
     MIN_DIALOG_HEIGHT = 560
+    RESIZE_HIT_MARGIN = 10
 
     def __init__(self, contact: ContactRecord, parent=None):
         self._contact = contact
         self._resize_active = False
+        self._resize_edge = ""
         self._resize_start_global_y = 0
         self._resize_start_height = 0
-        self.vertical_resize_handle: QWidget | None = None
+        self._resize_start_window_y = 0
+        self._page_transition_group: QParallelAnimationGroup | None = None
+        self._page_transition_active = False
+        self.page_stack: QStackedWidget | None = None
+        self.friend_moments_page: QWidget | None = None
+        self.my_moments_page: QWidget | None = None
+        self.back_button: FriendMomentsBackButton | None = None
+        self.minimize_button: MinimizeButton | None = None
         display_name = str(contact.display_name or contact.username or contact.id or "").strip()
         title = tr(
             "contact.friend_moments.title",
@@ -1000,20 +1065,21 @@ class FriendMomentsDialog(FluentDialog):
         self.resize(self.DIALOG_WIDTH, 720)
         self.setFixedWidth(self.DIALOG_WIDTH)
         self.setMinimumHeight(self.MIN_DIALOG_HEIGHT)
+        self.setMouseTracking(True)
+        self.title_bar.setMouseTracking(True)
+        self.content_widget.setMouseTracking(True)
+        self.content_widget.installEventFilter(self)
 
-        self.back_button = TransparentToolButton(CollectionIcon("arrow_left"), self.title_bar)
+        self.back_button = FriendMomentsBackButton(self.title_bar, corner_radius=self._radius)
         self.back_button.setObjectName("friendMomentsBackButton")
-        self.back_button.setFixedSize(48, 48)
-        self.back_button.setIconSize(QSize(18, 18))
         self.back_button.setToolTip(tr("common.back", "Back"))
-        self.back_button.clicked.connect(self.close)
+        self.back_button.clicked.connect(self._switch_to_my_moments)
 
-        self.minimize_button = TransparentToolButton(CollectionIcon("subtract"), self.title_bar)
+        self.minimize_button = MinimizeButton(self.title_bar)
         self.minimize_button.setObjectName("friendMomentsMinimizeButton")
-        self.minimize_button.setFixedSize(48, 48)
-        self.minimize_button.setIconSize(QSize(18, 18))
         self.minimize_button.setToolTip(tr("common.minimize", "Minimize"))
         self.minimize_button.clicked.connect(self.showMinimized)
+        self._apply_friend_title_button_colors()
 
         title_layout = self.title_bar.layout()
         if isinstance(title_layout, QHBoxLayout):
@@ -1021,47 +1087,267 @@ class FriendMomentsDialog(FluentDialog):
             title_layout.insertWidget(title_layout.count() - 1, self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)
 
         root = self.content_layout
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(14)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title_label = TitleLabel(title, self.content_widget)
+        self.page_stack = QStackedWidget(self.content_widget)
+        self.page_stack.setObjectName("friendMomentsPageStack")
+        self.page_stack.setMouseTracking(True)
+        self.page_stack.installEventFilter(self)
+        self.friend_moments_page = self._create_friend_moments_page(title)
+        self.my_moments_page = self._create_my_moments_page()
+        self.page_stack.addWidget(self.friend_moments_page)
+        self.page_stack.addWidget(self.my_moments_page)
+        self.page_stack.setCurrentWidget(self.friend_moments_page)
+        root.addWidget(self.page_stack)
+
+    def eventFilter(self, watched, event) -> bool:
+        resize_watchers = {
+            getattr(self, "title_bar", None),
+            getattr(self, "content_widget", None),
+            self.page_stack,
+            self.friend_moments_page,
+            self.my_moments_page,
+        }
+        if watched in resize_watchers:
+            if self._handle_vertical_resize_event(watched, event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._top_resize_hit_test(event.position().toPoint()):
+                self._begin_vertical_resize("top", event.globalPosition().toPoint().y())
+                event.accept()
+                return
+            if self._bottom_resize_hit_test(event.position().toPoint()):
+                self._begin_vertical_resize("bottom", event.globalPosition().toPoint().y())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._resize_active:
+            self._apply_vertical_resize(event.globalPosition().toPoint().y())
+            event.accept()
+            return
+        if self._top_resize_hit_test(event.position().toPoint()) or self._bottom_resize_hit_test(event.position().toPoint()):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._resize_active:
+            self._finish_vertical_resize()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self._resize_active:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def _create_friend_moments_page(self, title: str) -> QWidget:
+        page = QWidget(self.page_stack)
+        page.setObjectName("friendMomentsFriendPage")
+        page.setMouseTracking(True)
+        page.installEventFilter(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        title_label = TitleLabel(title, page)
         placeholder = BodyLabel(
             tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."),
-            self.content_widget,
+            page,
         )
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        root.addWidget(title_label)
-        root.addStretch(1)
-        root.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
+        layout.addWidget(title_label)
+        layout.addStretch(1)
+        layout.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        return page
 
-        self.vertical_resize_handle = QWidget(self.content_widget)
-        self.vertical_resize_handle.setObjectName("friendMomentsVerticalResizeHandle")
-        self.vertical_resize_handle.setFixedHeight(10)
-        self.vertical_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.vertical_resize_handle.installEventFilter(self)
-        root.addWidget(self.vertical_resize_handle)
+    def _create_my_moments_page(self) -> QWidget:
+        page = QWidget(self.page_stack)
+        page.setObjectName("friendMomentsMyPage")
+        page.setMouseTracking(True)
+        page.installEventFilter(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 18, 20, 24)
+        layout.setSpacing(16)
 
-    def eventFilter(self, watched, event) -> bool:
-        handle = self.vertical_resize_handle
-        if handle is not None and watched is handle:
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._resize_active = True
-                self._resize_start_global_y = event.globalPosition().toPoint().y()
-                self._resize_start_height = self.height()
+        toolbar = QWidget(page)
+        toolbar.setObjectName("friendMomentsToolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(10)
+
+        self.notify_button = TransparentToolButton(CollectionIcon("alert"), toolbar)
+        self.notify_button.setObjectName("friendMomentsNotifyButton")
+        self.notify_button.setToolTip(tr("discovery.notifications.button", "Notifications"))
+        self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), toolbar)
+        self.publish_moment_button.setObjectName("friendMomentsPublishButton")
+        self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, toolbar)
+        self.refresh_moments_button.setObjectName("friendMomentsRefreshButton")
+        self.refresh_moments_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
+
+        toolbar_layout.addWidget(self.notify_button, 0)
+        toolbar_layout.addWidget(self.publish_moment_button, 0)
+        toolbar_layout.addWidget(self.refresh_moments_button, 0)
+        toolbar_layout.addStretch(1)
+
+        title_label = TitleLabel(tr("common.moments", "Moments"), page)
+        placeholder = BodyLabel(tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."), page)
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(toolbar)
+        layout.addWidget(title_label)
+        layout.addStretch(1)
+        layout.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        return page
+
+    def _switch_to_my_moments(self) -> None:
+        if self._page_transition_active or self.page_stack.currentWidget() is self.my_moments_page:
+            return
+        current = self.page_stack.currentWidget()
+        target = self.my_moments_page
+        self._animate_page_transition(current, target, direction="right")
+
+    def _animate_page_transition(self, current: QWidget, target: QWidget, *, direction: str) -> None:
+        stack_size = self.page_stack.size()
+        if stack_size.width() <= 0 or stack_size.height() <= 0:
+            self.page_stack.setCurrentWidget(target)
+            self.setWindowTitle(tr("common.moments", "Moments"))
+            return
+
+        if self._page_transition_group is not None:
+            self._page_transition_group.stop()
+            self._page_transition_group.deleteLater()
+
+        self._page_transition_active = True
+        width = stack_size.width()
+        target_start = QPoint(-width, 0) if direction == "right" else QPoint(width, 0)
+        current_end = QPoint(width, 0) if direction == "right" else QPoint(-width, 0)
+
+        current.setGeometry(0, 0, stack_size.width(), stack_size.height())
+        target.setGeometry(0, 0, stack_size.width(), stack_size.height())
+        target.move(target_start)
+        target.show()
+        target.raise_()
+
+        current_animation = QPropertyAnimation(current, b"pos", self)
+        current_animation.setDuration(220)
+        current_animation.setStartValue(QPoint(0, 0))
+        current_animation.setEndValue(current_end)
+        current_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        target_animation = QPropertyAnimation(target, b"pos", self)
+        target_animation.setDuration(220)
+        target_animation.setStartValue(target_start)
+        target_animation.setEndValue(QPoint(0, 0))
+        target_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(current_animation)
+        group.addAnimation(target_animation)
+
+        def finish_transition() -> None:
+            self.page_stack.setCurrentWidget(target)
+            current.move(0, 0)
+            target.move(0, 0)
+            self.setWindowTitle(tr("common.moments", "Moments"))
+            self._page_transition_active = False
+            if self._page_transition_group is group:
+                self._page_transition_group = None
+            group.deleteLater()
+
+        group.finished.connect(finish_transition)
+        self._page_transition_group = group
+        group.start()
+
+    def _handle_vertical_resize_event(self, watched: QWidget, event) -> bool:
+        if not hasattr(event, "position"):
+            return False
+        event_type = event.type()
+        dialog_pos = watched.mapTo(self, event.position().toPoint())
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if self._top_resize_hit_test(dialog_pos):
+                self._begin_vertical_resize("top", event.globalPosition().toPoint().y())
                 event.accept()
                 return True
-            if event.type() == QEvent.Type.MouseMove and self._resize_active:
-                delta_y = event.globalPosition().toPoint().y() - self._resize_start_global_y
-                self.resize(self.width(), self._resize_start_height + delta_y)
+            if self._bottom_resize_hit_test(dialog_pos):
+                self._begin_vertical_resize("bottom", event.globalPosition().toPoint().y())
                 event.accept()
                 return True
-            if event.type() == QEvent.Type.MouseButtonRelease and self._resize_active:
-                self._resize_active = False
+        if event_type == QEvent.Type.MouseMove:
+            if self._resize_active:
+                self._apply_vertical_resize(event.globalPosition().toPoint().y())
                 event.accept()
                 return True
-        return super().eventFilter(watched, event)
+            if self._top_resize_hit_test(dialog_pos) or self._bottom_resize_hit_test(dialog_pos):
+                watched.setCursor(Qt.CursorShape.SizeVerCursor)
+            else:
+                watched.unsetCursor()
+        if event_type == QEvent.Type.MouseButtonRelease and self._resize_active:
+            self._finish_vertical_resize()
+            event.accept()
+            return True
+        return False
+
+    def _top_resize_hit_test(self, pos: QPoint) -> bool:
+        return 0 <= pos.y() <= self.RESIZE_HIT_MARGIN
+
+    def _bottom_resize_hit_test(self, pos: QPoint) -> bool:
+        return self.height() - self.RESIZE_HIT_MARGIN <= pos.y() <= self.height()
+
+    def _begin_vertical_resize(self, edge: str, global_y: int) -> None:
+        self._resize_active = True
+        self._resize_edge = edge
+        self._resize_start_global_y = global_y
+        self._resize_start_height = self.height()
+        self._resize_start_window_y = self.y()
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+
+    def _apply_vertical_resize(self, global_y: int) -> None:
+        delta_y = global_y - self._resize_start_global_y
+        if self._resize_edge == "top":
+            new_height = max(self.minimumHeight(), self._resize_start_height - delta_y)
+            new_y = self._resize_start_window_y + (self._resize_start_height - new_height)
+            self.setGeometry(self.x(), new_y, self.width(), new_height)
+            return
+        self.resize(self.width(), max(self.minimumHeight(), self._resize_start_height + delta_y))
+
+    def _finish_vertical_resize(self) -> None:
+        self._resize_active = False
+        self._resize_edge = ""
+        self.unsetCursor()
+
+    def _apply_fluent_surface(self) -> None:
+        super()._apply_fluent_surface()
+        self._apply_friend_title_button_colors()
+
+    def _apply_friend_title_button_colors(self) -> None:
+        buttons = [self.back_button, self.minimize_button]
+        if not any(buttons):
+            return
+        dark = isDarkTheme()
+        text_color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+        hover_bg = QColor(255, 255, 255, 26) if dark else QColor(0, 0, 0, 26)
+        pressed_bg = QColor(255, 255, 255, 51) if dark else QColor(0, 0, 0, 51)
+        for button in buttons:
+            if button is None:
+                continue
+            button.setNormalColor(text_color)
+            button.setHoverColor(text_color)
+            button.setPressedColor(text_color)
+            button.setNormalBackgroundColor(QColor(0, 0, 0, 0))
+            button.setHoverBackgroundColor(hover_bg)
+            button.setPressedBackgroundColor(pressed_bg)
 
 
 class UserSearchItem(CardWidget):
