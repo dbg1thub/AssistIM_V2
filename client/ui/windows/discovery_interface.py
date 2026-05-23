@@ -68,6 +68,7 @@ from client.ui.controllers.discovery_controller import (
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
 from client.ui.widgets.fluent_dialog import FluentDialog
+from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.image_viewer import ImageViewer
 
 
@@ -1801,6 +1802,469 @@ class MomentCard(CardWidget):
         QDesktopServices.openUrl(QUrl(video_source))
 
 
+class MomentsCoverBanner(QFrame):
+    """Profile cover placeholder that later accepts a user-uploaded moments banner."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsCoverBanner")
+        self.setFixedHeight(72)
+
+
+class MomentsNavItem(QFrame):
+    """Clickable row used by the left moments navigation."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str, parent=None, *, badge_text: str = ""):
+        super().__init__(parent)
+        self.setObjectName("MomentsNavItem")
+        self.setProperty("active", False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(32)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(8)
+
+        self.text_label = BodyLabel(text, self)
+        self.text_label.setObjectName("momentsNavItemText")
+        layout.addWidget(self.text_label, 1)
+
+        self.badge_label = CaptionLabel(badge_text, self)
+        self.badge_label.setObjectName("momentsNavBadge")
+        self.badge_label.setVisible(bool(str(badge_text or "").strip()))
+        layout.addWidget(self.badge_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def set_active(self, active: bool) -> None:
+        self.setProperty("active", bool(active))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class MomentsProfileBlock(QWidget):
+    """Left panel profile area with a floating identity row over the cover banner."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsProfileBlock")
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+        root_layout.setSpacing(10)
+
+        self.header_area = QWidget(self)
+        self.header_area.setObjectName("MomentsProfileHeaderArea")
+        self.header_area.setFixedHeight(112)
+        self.cover_banner = MomentsCoverBanner(self.header_area)
+
+        self.identity_row = QWidget(self.header_area)
+        self.identity_row.setObjectName("MomentsProfileIdentityRow")
+        identity_layout = QHBoxLayout(self.identity_row)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(10)
+
+        self.avatar = DiscoveryAvatar(40, self.identity_row)
+        self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
+        identity_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_column = QVBoxLayout()
+        text_column.setContentsMargins(0, 0, 0, 0)
+        text_column.setSpacing(2)
+        self.name_label = BodyLabel(tr("discovery.profile.name_placeholder", "Me"), self.identity_row)
+        self.name_label.setObjectName("MomentsProfileNameLabel")
+        self.bio_label = CaptionLabel(
+            tr("discovery.profile.bio_placeholder", "Share your moments"),
+            self.identity_row,
+        )
+        self.bio_label.setObjectName("MomentsProfileBioLabel")
+        self.bio_label.setWordWrap(False)
+        text_column.addWidget(self.name_label)
+        text_column.addWidget(self.bio_label)
+        identity_layout.addLayout(text_column, 1)
+
+        root_layout.addWidget(self.header_area)
+
+        stats_row = QHBoxLayout()
+        stats_row.setContentsMargins(0, 0, 0, 0)
+        stats_row.setSpacing(0)
+        stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.posts", "Moments")))
+        stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.friends", "Friends")))
+        stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.likes", "Likes")))
+        root_layout.addLayout(stats_row)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.cover_banner.setGeometry(0, 0, self.header_area.width(), 72)
+        self.identity_row.setGeometry(12, 52, max(0, self.width() - 24), 48)
+
+    def _create_stat_item(self, value: str, label: str) -> QWidget:
+        item = QWidget(self)
+        item.setObjectName("MomentsProfileStatItem")
+        layout = QVBoxLayout(item)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        value_label = BodyLabel(value, item)
+        value_label.setObjectName("MomentsProfileStatValue")
+        text_label = CaptionLabel(label, item)
+        text_label.setObjectName("MomentsProfileStatLabel")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(value_label)
+        layout.addWidget(text_label)
+        return item
+
+
+class MomentsLeftPanel(QWidget):
+    """Left moments profile and navigation panel."""
+
+    privacy_requested = Signal()
+    nav_changed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsLeftPanel")
+        self.setMinimumWidth(180)
+        self.resize(200, self.height())
+        self._nav_items: dict[str, MomentsNavItem] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.profile_block = MomentsProfileBlock(self)
+        layout.addWidget(self.profile_block, 0)
+
+        self.nav_container = QWidget(self)
+        self.nav_container.setObjectName("MomentsLeftNav")
+        nav_layout = QVBoxLayout(self.nav_container)
+        nav_layout.setContentsMargins(8, 10, 8, 10)
+        nav_layout.setSpacing(4)
+        self._add_nav_item(nav_layout, "feed", tr("discovery.nav.feed", "Friends Feed"), active=True)
+        self._add_nav_item(nav_layout, "mine", tr("discovery.nav.mine", "My Moments"))
+        self._add_nav_item(nav_layout, "likes", tr("discovery.nav.likes", "My Likes"), badge_text="0")
+        nav_layout.addSpacing(8)
+        self._add_nav_item(nav_layout, "saved", tr("discovery.nav.saved", "Saved"))
+        self._add_nav_item(nav_layout, "albums", tr("discovery.nav.albums", "Albums"))
+        self._add_nav_item(nav_layout, "footprints", tr("discovery.nav.footprints", "Footprints"))
+        nav_layout.addStretch(1)
+        layout.addWidget(self.nav_container, 1)
+
+        footer = QWidget(self)
+        footer.setObjectName("MomentsLeftFooter")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 10, 8, 12)
+        footer_layout.setSpacing(0)
+        self.privacy_button = MomentsNavItem(tr("discovery.feed.privacy_button", "Moment Privacy"), footer)
+        self.privacy_button.clicked.connect(self.privacy_requested.emit)
+        footer_layout.addWidget(self.privacy_button)
+        layout.addWidget(footer, 0)
+
+    def _add_nav_item(
+        self,
+        layout: QVBoxLayout,
+        key: str,
+        text: str,
+        *,
+        active: bool = False,
+        badge_text: str = "",
+    ) -> None:
+        item = MomentsNavItem(text, self.nav_container, badge_text=badge_text)
+        item.clicked.connect(lambda key=key: self._set_active_nav(key))
+        layout.addWidget(item)
+        self._nav_items[key] = item
+        if active:
+            item.set_active(True)
+
+    def _set_active_nav(self, key: str) -> None:
+        for item_key, item in self._nav_items.items():
+            item.set_active(item_key == key)
+        self.nav_changed.emit(key)
+
+
+class MomentsFeedToolbar(QWidget):
+    """Toolbar above the moments feed."""
+
+    refresh_requested = Signal()
+    notifications_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsFeedToolbar")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 12, 20, 10)
+        layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(10)
+        self.title_label = BodyLabel(tr("discovery.feed.title", "Moments"), self)
+        self.title_label.setObjectName("MomentsFeedTitle")
+        top_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        top_row.addStretch(1)
+
+        self.tab_container = QWidget(self)
+        self.tab_container.setObjectName("MomentsTabGroup")
+        tab_layout = QHBoxLayout(self.tab_container)
+        tab_layout.setContentsMargins(2, 2, 2, 2)
+        tab_layout.setSpacing(2)
+        self._tab_buttons: list[PushButton] = []
+        for index, label in enumerate((
+            tr("discovery.feed.tab_all", "All"),
+            tr("discovery.feed.tab_media", "Media"),
+            tr("discovery.feed.tab_links", "Links"),
+        )):
+            button = PushButton(label, self.tab_container)
+            button.setObjectName("MomentsTabButton")
+            button.setProperty("active", index == 0)
+            button.clicked.connect(lambda _checked=False, current=button: self._set_active_tab(current))
+            self._tab_buttons.append(button)
+            tab_layout.addWidget(button)
+        top_row.addWidget(self.tab_container, 0)
+
+        self.refresh_button = TransparentToolButton(AppIcon.SYNC, self)
+        self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        _apply_safe_button_font(self.refresh_button)
+        top_row.addWidget(self.refresh_button, 0)
+
+        self.notifications_button = PushButton(tr("discovery.notifications.button", "Notifications"), self)
+        self.notifications_button.clicked.connect(self.notifications_requested.emit)
+        top_row.addWidget(self.notifications_button, 0)
+        layout.addLayout(top_row)
+
+        self.summary_label = CaptionLabel(tr("discovery.feed.loading", "Loading moments..."), self)
+        self.summary_label.setObjectName("discoverySummaryLabel")
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+    def _set_active_tab(self, active_button: PushButton) -> None:
+        for button in self._tab_buttons:
+            button.setProperty("active", button is active_button)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
+
+class MomentsComposePrompt(BodyLabel):
+    """Clickable compose placeholder without runtime method replacement."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class MomentsComposeBar(QWidget):
+    """Compact publisher entry shown above the feed list."""
+
+    publish_requested = Signal()
+    image_requested = Signal()
+    link_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsComposeBar")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(10)
+
+        self.avatar = DiscoveryAvatar(32, self)
+        self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.input_prompt = MomentsComposePrompt(tr("discovery.compose.placeholder", "Share what is happening..."), self)
+        self.input_prompt.setObjectName("MomentsComposeInput")
+        self.input_prompt.clicked.connect(self.publish_requested.emit)
+        layout.addWidget(self.input_prompt, 1)
+
+        self.image_button = PushButton(tr("discovery.compose.image", "Image"), self)
+        self.link_button = PushButton(tr("discovery.compose.link", "Link"), self)
+        self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self)
+        self.image_button.clicked.connect(self.image_requested.emit)
+        self.link_button.clicked.connect(self.link_requested.emit)
+        self.publish_button.clicked.connect(self.publish_requested.emit)
+        layout.addWidget(self.image_button, 0)
+        layout.addWidget(self.link_button, 0)
+        layout.addWidget(self.publish_button, 0)
+
+
+class MomentsFeedList(QWidget):
+    """Scrollable middle feed list that keeps the existing MomentCard pipeline."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsFeedList")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.scroll_area = ScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        _prepare_transparent_scroll_area(self.scroll_area)
+        if self.scroll_area.viewport() is not None:
+            self.scroll_area.viewport().setObjectName("discoveryViewport")
+
+        self.feed_container = QWidget(self.scroll_area)
+        self.feed_container.setObjectName("discoveryFeedContainer")
+        self.feed_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.feed_container.setAutoFillBackground(False)
+        self.feed_layout = QVBoxLayout(self.feed_container)
+        self.feed_layout.setContentsMargins(20, 16, 20, 28)
+        self.feed_layout.setSpacing(12)
+        self.scroll_area.setWidget(self.feed_container)
+        layout.addWidget(self.scroll_area, 1)
+
+
+class MomentsFeedPanel(QWidget):
+    """Center panel containing toolbar, compose bar, and the scrollable feed."""
+
+    refresh_requested = Signal()
+    publish_requested = Signal()
+    notifications_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsFeedPanel")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.toolbar = MomentsFeedToolbar(self)
+        self.compose_bar = MomentsComposeBar(self)
+        self.feed_list = MomentsFeedList(self)
+        layout.addWidget(self.toolbar, 0)
+        layout.addWidget(self.compose_bar, 0)
+        layout.addWidget(self.feed_list, 1)
+
+        self.refresh_button = self.toolbar.refresh_button
+        self.notifications_button = self.toolbar.notifications_button
+        self.publish_button = self.compose_bar.publish_button
+        self.summary_label = self.toolbar.summary_label
+        self.scroll_area = self.feed_list.scroll_area
+        self.feed_container = self.feed_list.feed_container
+        self.feed_layout = self.feed_list.feed_layout
+
+        self.toolbar.refresh_requested.connect(self.refresh_requested.emit)
+        self.toolbar.notifications_requested.connect(self.notifications_requested.emit)
+        self.compose_bar.publish_requested.connect(self.publish_requested.emit)
+        self.compose_bar.image_requested.connect(self.publish_requested.emit)
+        self.compose_bar.link_requested.connect(self.publish_requested.emit)
+
+
+class MomentsRightPanel(QWidget):
+    """Right panel with placeholder sidebar cards for the redesigned moments page."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsRightPanel")
+        self.setMinimumWidth(220)
+        self.resize(240, self.height())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.scroll_area = ScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        _prepare_transparent_scroll_area(self.scroll_area)
+        self.content = QWidget(self.scroll_area)
+        self.content.setObjectName("MomentsRightContent")
+        content_layout = QVBoxLayout(self.content)
+        content_layout.setContentsMargins(16, 14, 16, 18)
+        content_layout.setSpacing(12)
+        content_layout.addWidget(self._create_digest_section())
+        content_layout.addWidget(self._create_list_section(
+            tr("discovery.sidebar.online", "Online Friends"),
+            [
+                tr("discovery.sidebar.online_placeholder_1", "Friends who just posted will appear here."),
+                tr("discovery.sidebar.online_placeholder_2", "Online status is reserved for later."),
+            ],
+        ))
+        content_layout.addWidget(self._create_list_section(
+            tr("discovery.sidebar.topics", "Hot Topics"),
+            [
+                tr("discovery.sidebar.topic_placeholder_1", "Product updates"),
+                tr("discovery.sidebar.topic_placeholder_2", "Local AI"),
+                tr("discovery.sidebar.topic_placeholder_3", "UI design"),
+            ],
+        ))
+        content_layout.addWidget(self._create_list_section(
+            tr("discovery.sidebar.suggestions", "People You May Know"),
+            [tr("discovery.sidebar.suggestions_placeholder", "Suggestions will be shown here.")],
+        ))
+        content_layout.addStretch(1)
+        self.scroll_area.setWidget(self.content)
+        layout.addWidget(self.scroll_area, 1)
+
+    def _create_digest_section(self) -> QWidget:
+        section = self._create_section(tr("discovery.sidebar.ai_digest", "AI Daily Digest"))
+        card = QFrame(section)
+        card.setObjectName("MomentsDigestCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(10, 10, 10, 10)
+        card_layout.setSpacing(6)
+        label = CaptionLabel(tr("discovery.sidebar.digest_label", "Feed overview"), card)
+        label.setObjectName("MomentsDigestLabel")
+        text = BodyLabel(
+            tr(
+                "discovery.sidebar.digest_placeholder",
+                "AI digest will summarize today's friend updates here.",
+            ),
+            card,
+        )
+        text.setWordWrap(True)
+        card_layout.addWidget(label)
+        card_layout.addWidget(text)
+        section.layout().addWidget(card)
+        return section
+
+    def _create_list_section(self, title: str, items: list[str]) -> QWidget:
+        section = self._create_section(title)
+        for item_text in items:
+            item = CaptionLabel(item_text, section)
+            item.setObjectName("MomentsRightListItem")
+            item.setWordWrap(True)
+            section.layout().addWidget(item)
+        return section
+
+    def _create_section(self, title: str) -> QWidget:
+        section = QFrame(self.content if hasattr(self, "content") else self)
+        section.setObjectName("MomentsRightSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 12)
+        layout.setSpacing(8)
+        title_label = CaptionLabel(title, section)
+        title_label.setObjectName("MomentsRightSectionTitle")
+        layout.addWidget(title_label)
+        return section
+
+
 class DiscoveryInterface(QWidget):
     """Moments feed styled to match the current chat/contact Fluent UI."""
 
@@ -1843,99 +2307,38 @@ class DiscoveryInterface(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        self.scroll_area = ScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        _prepare_transparent_scroll_area(self.scroll_area)
-        if self.scroll_area.viewport() is not None:
-            self.scroll_area.viewport().setObjectName("discoveryViewport")
+        self.splitter = FluentSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.setObjectName("momentsSplitter")
+        self.splitter.setHandleWidth(8)
 
-        self.scroll_widget = QWidget(self.scroll_area)
-        self.scroll_widget.setObjectName("discoveryScrollWidget")
-        self.scroll_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.scroll_widget.setAutoFillBackground(False)
-        self.scroll_widget.setStyleSheet("background: transparent; border: none;")
-        self.scroll_layout = QVBoxLayout(self.scroll_widget)
-        self.scroll_layout.setContentsMargins(24, 24, 24, 32)
-        self.scroll_layout.setSpacing(18)
-        self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.left_panel = MomentsLeftPanel(self.splitter)
+        self.feed_panel = MomentsFeedPanel(self.splitter)
+        self.right_panel = MomentsRightPanel(self.splitter)
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(self.feed_panel)
+        self.splitter.addWidget(self.right_panel)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        self.splitter.setSizes([200, 720, 240])
+        main_layout.addWidget(self.splitter)
 
-        self.column = QWidget(self.scroll_widget)
-        self.column.setObjectName("discoveryColumn")
-        self.column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.column.setAutoFillBackground(False)
-        self.column.setMaximumWidth(880)
-        self.column_layout = QVBoxLayout(self.column)
-        self.column_layout.setContentsMargins(0, 0, 0, 0)
-        self.column_layout.setSpacing(16)
-
-        self.hero_card = CardWidget(self.column)
-        self.hero_card.setObjectName("DiscoveryHeroCard")
-        self.hero_card.setBorderRadius(8)
-        hero_layout = QVBoxLayout(self.hero_card)
-        hero_layout.setContentsMargins(24, 24, 24, 24)
-        hero_layout.setSpacing(18)
-
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(12)
-
-        title_stack = QVBoxLayout()
-        title_stack.setContentsMargins(0, 0, 0, 0)
-        title_stack.setSpacing(6)
-        title_stack.addWidget(TitleLabel(tr("discovery.feed.title", "Moments"), self.hero_card))
-        title_stack.addWidget(
-            CaptionLabel(
-                tr(
-                    "discovery.feed.subtitle",
-                    "Share updates, browse what's new, and keep the conversation going in comments.",
-                ),
-                self.hero_card,
-            )
-        )
-
-        self.refresh_button = TransparentToolButton(AppIcon.SYNC, self.hero_card)
-        self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
-        _apply_safe_button_font(self.refresh_button)
-        self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)
-        self.notifications_button = PushButton(tr("discovery.notifications.button", "Notifications"), self.hero_card)
-        self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.hero_card)
-
-        top_row.addLayout(title_stack, 1)
-        top_row.addWidget(self.refresh_button, 0)
-        top_row.addWidget(self.notifications_button, 0)
-        top_row.addWidget(self.privacy_button, 0)
-        top_row.addWidget(self.publish_button, 0)
-
-        self.summary_label = BodyLabel(tr("discovery.feed.loading", "Loading moments..."), self.hero_card)
-        self.summary_label.setObjectName("discoverySummaryLabel")
-        self.summary_label.setWordWrap(True)
-
-        hero_layout.addLayout(top_row)
-        hero_layout.addWidget(self.summary_label)
-
-        self.feed_container = QWidget(self.column)
-        self.feed_container.setObjectName("discoveryFeedContainer")
-        self.feed_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.feed_container.setAutoFillBackground(False)
-        self.feed_layout = QVBoxLayout(self.feed_container)
-        self.feed_layout.setContentsMargins(0, 0, 0, 0)
-        self.feed_layout.setSpacing(16)
-
-        self.column_layout.addWidget(self.hero_card)
-        self.column_layout.addWidget(self.feed_container)
-        self.scroll_layout.addWidget(self.column, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        self.scroll_area.setWidget(self.scroll_widget)
-        main_layout.addWidget(self.scroll_area)
+        self.scroll_area = self.feed_panel.scroll_area
+        self.feed_container = self.feed_panel.feed_container
+        self.feed_layout = self.feed_panel.feed_layout
+        self.refresh_button = self.feed_panel.refresh_button
+        self.notifications_button = self.feed_panel.notifications_button
+        self.publish_button = self.feed_panel.publish_button
+        self.privacy_button = self.left_panel.privacy_button
+        self.summary_label = self.feed_panel.summary_label
 
         StyleSheet.DISCOVERY_INTERFACE.apply(self)
 
     def _connect_signals(self) -> None:
-        self.refresh_button.clicked.connect(self.reload_data)
-        self.privacy_button.clicked.connect(self._open_privacy_settings_dialog)
-        self.notifications_button.clicked.connect(self._open_notifications_dialog)
-        self.publish_button.clicked.connect(self._open_publish_dialog)
+        self.feed_panel.refresh_requested.connect(self.reload_data)
+        self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)
+        self.feed_panel.notifications_requested.connect(self._open_notifications_dialog)
+        self.feed_panel.publish_requested.connect(self._open_publish_dialog)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
 
     def reload_data(self) -> None:

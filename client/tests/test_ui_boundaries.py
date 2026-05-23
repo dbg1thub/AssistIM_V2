@@ -403,6 +403,42 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
 
 
+def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
+
+    assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in discovery_interface
+    assert 'class MomentsLeftPanel(QWidget):' in discovery_interface
+    assert 'class MomentsFeedPanel(QWidget):' in discovery_interface
+    assert 'class MomentsRightPanel(QWidget):' in discovery_interface
+    assert 'class MomentsProfileBlock(QWidget):' in discovery_interface
+    assert 'class MomentsCoverBanner(QFrame):' in discovery_interface
+    assert 'class MomentsComposePrompt(BodyLabel):' in discovery_interface
+    assert 'self.identity_row.setGeometry(12, 52, max(0, self.width() - 24), 48)' in discovery_interface
+    assert 'self.input_prompt.clicked.connect(self.publish_requested.emit)' in discovery_interface
+    assert 'self.input_prompt.mousePressEvent =' not in discovery_interface
+    assert 'self.splitter = FluentSplitter(Qt.Orientation.Horizontal, self)' in discovery_interface
+    assert 'self.splitter.setObjectName("momentsSplitter")' in discovery_interface
+    assert 'self.left_panel = MomentsLeftPanel(self.splitter)' in discovery_interface
+    assert 'self.feed_panel = MomentsFeedPanel(self.splitter)' in discovery_interface
+    assert 'self.right_panel = MomentsRightPanel(self.splitter)' in discovery_interface
+    assert 'self.splitter.setStretchFactor(1, 1)' in discovery_interface
+    assert 'self.feed_container = self.feed_panel.feed_container' in discovery_interface
+    assert 'self.feed_layout = self.feed_panel.feed_layout' in discovery_interface
+    assert 'self.refresh_button = self.feed_panel.refresh_button' in discovery_interface
+    assert 'self.publish_button = self.feed_panel.publish_button' in discovery_interface
+    assert 'self.privacy_button = self.left_panel.privacy_button' in discovery_interface
+    assert 'self.notifications_button = self.feed_panel.notifications_button' in discovery_interface
+    assert 'self.feed_panel.publish_requested.connect(self._open_publish_dialog)' in discovery_interface
+    assert 'self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)' in discovery_interface
+    assert 'self.feed_panel.refresh_requested.connect(self.reload_data)' in discovery_interface
+    assert 'QWidget#MomentsLeftPanel' in qss
+    assert 'QWidget#MomentsFeedPanel' in qss
+    assert 'QWidget#MomentsRightPanel' in qss
+    assert 'QFrame#MomentsCoverBanner' in qss
+    assert 'QSplitter#momentsSplitter' in qss
+
+
 def test_discovery_media_grid_loads_remote_media_with_auth_header() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     media_grid_block = discovery_interface.split('class MomentMediaGrid(QWidget):', 1)[1].split(
@@ -484,7 +520,8 @@ def test_discovery_ui_exposes_moment_privacy_entry_points() -> None:
     assert 'class MomentVisibilitySelectDialog(FluentDialog):' in discovery_interface
     assert 'class MomentPrivacySettingsDialog(FluentDialog):' in discovery_interface
     assert 'self.visibility_button = PushButton(tr("discovery.dialog.visibility_title", "Who can see this"), self)' in discovery_interface
-    assert 'self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)' in discovery_interface
+    assert 'self.privacy_button = self.left_panel.privacy_button' in discovery_interface
+    assert 'self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)' in discovery_interface
     assert 'dialog.submitted.connect(self._create_moment)' in discovery_interface
     assert 'def _create_moment(self, content: str, media_paths: list | None = None, visibility_scope: str = "public", visibility_user_ids: list | None = None) -> None:' in discovery_interface
     assert 'await self._controller.update_moment_privacy_settings(' in discovery_interface
@@ -555,8 +592,8 @@ def test_discovery_ui_wires_moment_notification_entry() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
     assert 'class MomentNotificationDialog(FluentDialog):' in discovery_interface
-    assert 'self.notifications_button = PushButton(' in discovery_interface
-    assert 'self.notifications_button.clicked.connect(self._open_notifications_dialog)' in discovery_interface
+    assert 'self.notifications_button = self.feed_panel.notifications_button' in discovery_interface
+    assert 'self.feed_panel.notifications_requested.connect(self._open_notifications_dialog)' in discovery_interface
     assert 'await self._controller.load_moment_notifications(' in discovery_interface
     assert 'await self._controller.mark_moment_notifications_read(' in discovery_interface
     assert 'self._sync_moment_notification_badge(' in discovery_interface

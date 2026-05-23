@@ -3,8 +3,143 @@ QWidget#MomentCommentSection,
 QWidget#discoveryScrollWidget,
 QWidget#discoveryViewport,
 QWidget#discoveryColumn,
-QWidget#discoveryFeedContainer {
+QWidget#discoveryFeedContainer,
+QWidget#MomentsFeedList,
+QWidget#MomentsRightContent {
     background: transparent;
+}
+
+QSplitter#momentsSplitter {
+    background: {{SURFACE_BG}};
+    border: none;
+}
+
+QWidget#MomentsLeftPanel {
+    background: {{SURFACE_BG}};
+    border-right: 1px solid {{BORDER_COLOR}};
+}
+
+QWidget#MomentsFeedPanel {
+    background: {{SURFACE_BG}};
+}
+
+QWidget#MomentsRightPanel {
+    background: {{CARD_BG_STRONG}};
+    border-left: 1px solid {{BORDER_COLOR}};
+}
+
+QWidget#MomentsProfileBlock {
+    border-bottom: 1px solid {{BORDER_COLOR}};
+}
+
+QFrame#MomentsCoverBanner {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #264763, stop:1 #1f5c4d);
+    border-radius: {{RADIUS_CARD}};
+}
+
+QWidget#MomentsProfileIdentityRow {
+    background: transparent;
+}
+
+QLabel#MomentsProfileNameLabel,
+QLabel#MomentsFeedTitle {
+    color: {{TEXT_PRIMARY}};
+    font: 600 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#MomentsProfileBioLabel,
+QLabel#MomentsProfileStatLabel,
+QLabel#MomentsRightListItem {
+    color: {{TEXT_SECONDARY}};
+    font: 11px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#MomentsProfileStatValue {
+    color: {{TEXT_PRIMARY}};
+    font: 600 14px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#MomentsLeftFooter {
+    border-top: 1px solid {{BORDER_COLOR}};
+}
+
+QFrame#MomentsNavItem {
+    background: transparent;
+    border: none;
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#MomentsNavItem:hover,
+QFrame#MomentsNavItem[active="true"] {
+    background: {{CARD_BG_STRONG}};
+}
+
+QLabel#momentsNavItemText {
+    color: {{TEXT_SECONDARY}};
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QFrame#MomentsNavItem[active="true"] QLabel#momentsNavItemText {
+    color: {{TEXT_PRIMARY}};
+    font: 600 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#momentsNavBadge {
+    background: #e24b4a;
+    color: #ffffff;
+    border-radius: 8px;
+    padding: 1px 6px;
+}
+
+QWidget#MomentsFeedToolbar,
+QWidget#MomentsComposeBar {
+    background: {{CARD_BG_STRONG}};
+    border-bottom: 1px solid {{BORDER_COLOR}};
+}
+
+QWidget#MomentsTabGroup {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QPushButton#MomentsTabButton {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    color: {{TEXT_SECONDARY}};
+}
+
+QPushButton#MomentsTabButton[active="true"] {
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR}};
+    color: {{TEXT_PRIMARY}};
+    font-weight: 600;
+}
+
+QLabel#MomentsComposeInput {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+    padding: 7px 12px;
+    color: {{TEXT_SECONDARY}};
+}
+
+QFrame#MomentsRightSection {
+    border-bottom: 1px solid {{BORDER_COLOR}};
+}
+
+QLabel#MomentsRightSectionTitle,
+QLabel#MomentsDigestLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 600 11px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QFrame#MomentsDigestCard {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
 }
 
 QWidget#DiscoveryHeroCard,
