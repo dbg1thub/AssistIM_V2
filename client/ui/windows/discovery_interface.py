@@ -2050,7 +2050,7 @@ class MomentsLeftPanel(QWidget):
         self.nav_container = QWidget(self)
         self.nav_container.setObjectName("MomentsLeftNav")
         nav_layout = QVBoxLayout(self.nav_container)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setContentsMargins(0, MOMENTS_PANEL_CONTENT_SPACING, 0, 0)
         nav_layout.setSpacing(0)
         self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
         self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))

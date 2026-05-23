@@ -499,7 +499,8 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
     assert 'self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE' in discovery_interface
-    assert 'nav_layout.setContentsMargins(0, 0, 0, 0)' in discovery_interface
+    assert 'nav_layout.setContentsMargins(0, MOMENTS_PANEL_CONTENT_SPACING, 0, 0)' in discovery_interface
+    assert 'nav_layout.setContentsMargins(0, 0, 0, 0)' not in left_panel_block
     assert 'nav_layout.setSpacing(0)' in discovery_interface
     assert 'layout.setContentsMargins(0, 0, 0, 0)' in left_panel_block
     assert 'layout.setSpacing(0)' in left_panel_block
