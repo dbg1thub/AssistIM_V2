@@ -1072,7 +1072,7 @@ class FriendMomentsDialog(FluentDialog):
         super().__init__(parent=parent, title="")
         self.setObjectName("FriendMomentsDialog")
         self.setWindowTitle("")
-        self.title_label.hide()
+        self.title_label.setText("")
         self.resize(self.DIALOG_WIDTH, 720)
         self.setFixedWidth(self.DIALOG_WIDTH)
         self.setMinimumHeight(self.MIN_DIALOG_HEIGHT)

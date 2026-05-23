@@ -603,7 +603,8 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'class FriendMomentsBackButton(FriendMomentsTitleIconButton):' in contact_interface
     assert 'super().__init__(parent=parent, title="")' in contact_interface
     assert 'self.setWindowTitle("")' in contact_interface
-    assert 'self.title_label.hide()' in contact_interface
+    assert 'self.title_label.setText("")' in contact_interface
+    assert 'self.title_label.hide()' not in contact_interface
     assert 'self.setWindowTitle(tr("common.moments", "Moments"))' not in contact_interface
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
