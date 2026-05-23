@@ -10,10 +10,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
     QEvent,
-    QEasingCurve,
     QPoint,
-    QParallelAnimationGroup,
-    QPropertyAnimation,
     QRect,
     QRectF,
     Qt,
@@ -23,7 +20,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -73,6 +70,7 @@ from client.ui.controllers.contact_controller import (
 )
 
 from client.ui.styles import StyleSheet
+from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
@@ -1003,9 +1001,7 @@ class FriendMomentsDialog(FluentDialog):
         self._resize_start_global_y = 0
         self._resize_start_height = 0
         self._resize_start_window_y = 0
-        self._page_transition_group: QParallelAnimationGroup | None = None
-        self._page_transition_active = False
-        self.page_stack: QStackedWidget | None = None
+        self.page_stack: AnimatedStackWidget | None = None
         self.friend_moments_page: QWidget | None = None
         self.my_moments_page: QWidget | None = None
         self.back_button: FluentDialogTitleButton | None = None
@@ -1058,7 +1054,7 @@ class FriendMomentsDialog(FluentDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.page_stack = QStackedWidget(self.content_widget)
+        self.page_stack = AnimatedStackWidget(self.content_widget)
         self.page_stack.setObjectName("friendMomentsPageStack")
         self.page_stack.setMouseTracking(True)
         self.page_stack.installEventFilter(self)
@@ -1067,6 +1063,7 @@ class FriendMomentsDialog(FluentDialog):
         self.page_stack.addWidget(self.friend_moments_page)
         self.page_stack.addWidget(self.my_moments_page)
         self.page_stack.setCurrentWidget(self.friend_moments_page)
+        self.page_stack.currentChanged.connect(lambda _index: self._sync_title_bar_actions())
         root.addWidget(self.page_stack)
         self._sync_title_bar_actions()
 
@@ -1203,65 +1200,9 @@ class FriendMomentsDialog(FluentDialog):
         return page
 
     def _switch_to_my_moments(self) -> None:
-        if self._page_transition_active or self.page_stack.currentWidget() is self.my_moments_page:
+        if self.page_stack.currentWidget() is self.my_moments_page:
             return
-        current = self.page_stack.currentWidget()
-        target = self.my_moments_page
-        self._animate_page_transition(current, target, direction="right")
-
-    def _animate_page_transition(self, current: QWidget, target: QWidget, *, direction: str) -> None:
-        stack_size = self.page_stack.size()
-        if stack_size.width() <= 0 or stack_size.height() <= 0:
-            self.page_stack.setCurrentWidget(target)
-            self.setWindowTitle("")
-            self._sync_title_bar_actions()
-            return
-
-        if self._page_transition_group is not None:
-            self._page_transition_group.stop()
-            self._page_transition_group.deleteLater()
-
-        self._page_transition_active = True
-        width = stack_size.width()
-        target_start = QPoint(-width, 0) if direction == "right" else QPoint(width, 0)
-        current_end = QPoint(width, 0) if direction == "right" else QPoint(-width, 0)
-
-        current.setGeometry(0, 0, stack_size.width(), stack_size.height())
-        target.setGeometry(0, 0, stack_size.width(), stack_size.height())
-        target.move(target_start)
-        target.show()
-        target.raise_()
-
-        current_animation = QPropertyAnimation(current, b"pos", self)
-        current_animation.setDuration(220)
-        current_animation.setStartValue(QPoint(0, 0))
-        current_animation.setEndValue(current_end)
-        current_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        target_animation = QPropertyAnimation(target, b"pos", self)
-        target_animation.setDuration(220)
-        target_animation.setStartValue(target_start)
-        target_animation.setEndValue(QPoint(0, 0))
-        target_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        group = QParallelAnimationGroup(self)
-        group.addAnimation(current_animation)
-        group.addAnimation(target_animation)
-
-        def finish_transition() -> None:
-            self.page_stack.setCurrentWidget(target)
-            current.move(0, 0)
-            target.move(0, 0)
-            self.setWindowTitle("")
-            self._sync_title_bar_actions()
-            self._page_transition_active = False
-            if self._page_transition_group is group:
-                self._page_transition_group = None
-            group.deleteLater()
-
-        group.finished.connect(finish_transition)
-        self._page_transition_group = group
-        group.start()
+        self.page_stack.slide_to_widget(self.my_moments_page, direction="right")
 
     def _sync_title_bar_actions(self) -> None:
         is_my_moments = self.page_stack is not None and self.page_stack.currentWidget() is self.my_moments_page
@@ -1863,7 +1804,7 @@ class ContactInterface(QWidget):
         self.segmented.addItem("blocked", tr("contact.sidebar.tab.blocked", "Blocked"), lambda: self._switch_page("blocked"))
         self.segmented.setMinimumHeight(36)
 
-        self.page_stack = QStackedWidget(sidebar)
+        self.page_stack = AnimatedStackWidget(sidebar)
         self.friends_page, self.friends_container, self.friends_layout = self._create_scroll_page()
         self.groups_page, self.groups_container, self.groups_layout = self._create_scroll_page()
         self.requests_page, self.requests_container, self.requests_layout = self._create_scroll_page()
@@ -1890,7 +1831,7 @@ class ContactInterface(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(sidebar)
 
-        self.detail_stack = QStackedWidget(self)
+        self.detail_stack = AnimatedStackWidget(self)
         self.detail_stack.setObjectName("contactDetailStack")
         self.welcome_panel = ContactWelcomeWidget(self.detail_stack)
         self.detail_panel = GalleryContactDetailPanel(self.detail_stack)
@@ -1939,15 +1880,21 @@ class ContactInterface(QWidget):
         return area, container, layout
 
     def _show_welcome_panel(self) -> None:
-        self.detail_stack.setCurrentWidget(self.welcome_panel)
+        self.detail_stack.slide_to_widget(self.welcome_panel, direction="right")
 
     def _show_detail_panel(self) -> None:
-        self.detail_stack.setCurrentWidget(self.detail_panel)
+        self.detail_stack.slide_to_widget(self.detail_panel, direction="right")
 
     def _activate_page(self, key: str) -> None:
         self._current_page = key
         self.segmented.setCurrentItem(key)
-        self.page_stack.setCurrentIndex({"friends": 0, "groups": 1, "requests": 2, "blocked": 3}[key])
+        target = {
+            "friends": self.friends_page,
+            "groups": self.groups_page,
+            "requests": self.requests_page,
+            "blocked": self.blocked_page,
+        }[key]
+        self.page_stack.slide_to_widget(target, direction="right")
 
     def _switch_page(self, key: str) -> None:
         if key != self._current_page:

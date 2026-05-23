@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QVBoxLayout, QWidget
 from shiboken6 import isValid as is_valid_qt_object
 
 from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton
@@ -26,6 +26,7 @@ from client.delegates.message_delegate import MessageDelegate
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, merge_sender_profile_extra
 from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
+from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
 from client.ui.widgets.fluent_scrollbar import (
@@ -308,7 +309,7 @@ class ChatPanel(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.stack = QStackedWidget(self)
+        self.stack = AnimatedStackWidget(self)
 
         self.welcome_widget = WelcomeWidget(self)
         self.chat_page = QWidget(self)
@@ -512,7 +513,7 @@ class ChatPanel(QWidget):
     def show_welcome(self) -> None:
         """Show welcome page and disable input."""
         self._current_session = None
-        self.stack.setCurrentWidget(self.welcome_widget)
+        self.stack.slide_to_widget(self.welcome_widget, direction="right")
         if self._message_delegate:
             self._message_delegate.set_session(None)
         self.chat_header.set_group_announcement_session(None)
@@ -535,7 +536,7 @@ class ChatPanel(QWidget):
             "chat_page" if self.stack.currentWidget() is self.chat_page else "welcome_widget",
             self._history_request_pending,
         )
-        self.stack.setCurrentWidget(self.chat_page)
+        self.stack.slide_to_widget(self.chat_page, direction="right")
         self.message_input.set_session_active(True)
         self.message_input.focus_editor()
         if self._history_request_pending:

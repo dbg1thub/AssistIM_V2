@@ -14,22 +14,25 @@ class AnimatedStackWidget(QStackedWidget):
         self._duration_ms = int(duration_ms)
         self._transition_group: QParallelAnimationGroup | None = None
         self._transition_active = False
+        self._pending_transition: tuple[QWidget, str] | None = None
 
     def slide_to_widget(self, target: QWidget, *, direction: str = "right") -> None:
-        current = self.currentWidget()
-        if current is target or target is None:
+        if target is None:
             return
         if self.indexOf(target) < 0:
             self.addWidget(target)
+        if self._transition_active:
+            self._pending_transition = (target, direction)
+            return
+
+        current = self.currentWidget()
+        if current is target:
+            return
 
         stack_size = self.size()
         if current is None or stack_size.width() <= 0 or stack_size.height() <= 0:
             self.setCurrentWidget(target)
             return
-
-        if self._transition_group is not None:
-            self._transition_group.stop()
-            self._transition_group.deleteLater()
 
         self._transition_active = True
         width = stack_size.width()
@@ -65,7 +68,12 @@ class AnimatedStackWidget(QStackedWidget):
             self._transition_active = False
             if self._transition_group is group:
                 self._transition_group = None
+            pending_transition = self._pending_transition
+            self._pending_transition = None
             group.deleteLater()
+            if pending_transition is not None:
+                pending_target, pending_direction = pending_transition
+                self.slide_to_widget(pending_target, direction=pending_direction)
 
         group.finished.connect(finish_transition)
         self._transition_group = group

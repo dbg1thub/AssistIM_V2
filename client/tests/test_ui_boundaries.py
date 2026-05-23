@@ -470,6 +470,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'class AnimatedStackWidget(QStackedWidget):' in animated_stack
     assert 'def __init__(self, parent=None, *, duration_ms: int = 280):' in animated_stack
     assert 'def slide_to_widget(self, target: QWidget, *, direction: str = "right") -> None:' in animated_stack
+    assert 'self._pending_transition: tuple[QWidget, str] | None = None' in animated_stack
+    assert 'if self._transition_active:' in animated_stack
+    assert 'self._pending_transition = (target, direction)' in animated_stack
+    assert 'pending_transition = self._pending_transition' in animated_stack
+    assert 'self._pending_transition = None' in animated_stack
+    assert 'self._transition_group.stop()' not in animated_stack
     assert 'QPropertyAnimation(current, b"pos", self)' in animated_stack
     assert 'QPropertyAnimation(target, b"pos", self)' in animated_stack
     assert 'QEasingCurve.Type.InOutCubic' in animated_stack
@@ -925,12 +931,15 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
     assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
+    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in contact_interface
     assert 'self.minimize_button = self.add_title_right_button(' in contact_interface
     assert 'self._title_icon_minimize_path' in contact_interface
     assert 'self.back_button = self.add_title_left_button(' in contact_interface
     assert 'self._title_icon_back_path' in contact_interface
     assert 'corner="left"' in contact_interface
-    assert 'self.page_stack = QStackedWidget(self.content_widget)' in contact_interface
+    assert 'self.page_stack: AnimatedStackWidget | None = None' in contact_interface
+    assert 'self.page_stack = AnimatedStackWidget(self.content_widget)' in contact_interface
+    assert 'self.page_stack = QStackedWidget(self.content_widget)' not in contact_interface
     assert 'self.friend_moments_page = self._create_friend_moments_page()' in contact_interface
     assert 'self.my_moments_page = self._create_my_moments_page()' in contact_interface
     assert 'self.notify_button = self.add_title_left_button(' in contact_interface
@@ -960,8 +969,9 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self.back_button.setVisible(not is_my_moments)' in contact_interface
     assert 'button.setVisible(is_my_moments)' in contact_interface
     assert 'def _switch_to_my_moments(self) -> None:' in contact_interface
-    assert 'self._animate_page_transition(current, target, direction="right")' in contact_interface
-    assert 'QPropertyAnimation(current, b"pos", self)' in contact_interface
+    assert 'self.page_stack.slide_to_widget(self.my_moments_page, direction="right")' in contact_interface
+    assert 'def _animate_page_transition' not in friend_dialog_block
+    assert 'QPropertyAnimation(current, b"pos", self)' not in contact_interface
     assert 'self._top_resize_hit_test(event.position().toPoint())' in contact_interface
     assert 'self._bottom_resize_hit_test(event.position().toPoint())' in contact_interface
     assert 'self.resize(self.width(), max(self.minimumHeight(), self._resize_start_height + delta_y))' in contact_interface
@@ -1386,6 +1396,11 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
 
     assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
     assert 'chatFloatingComposerOverlay' not in chat_panel
+    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in chat_panel
+    assert 'self.stack = AnimatedStackWidget(self)' in chat_panel
+    assert 'self.stack = QStackedWidget(self)' not in chat_panel
+    assert 'self.stack.slide_to_widget(self.welcome_widget, direction="right")' in chat_panel
+    assert 'self.stack.slide_to_widget(self.chat_page, direction="right")' in chat_panel
     assert 'FluentSplitter' not in chat_panel
     assert 'chatContentSplitter' not in chat_panel
     assert 'self.chat_content_area = QWidget(self.chat_page)' in chat_panel
@@ -1879,6 +1894,14 @@ def test_message_delegate_paint_hot_path_caches_avatar_and_media_sources() -> No
 def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
+    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in contact_interface
+    assert 'self.page_stack = AnimatedStackWidget(sidebar)' in contact_interface
+    assert 'self.detail_stack = AnimatedStackWidget(self)' in contact_interface
+    assert 'self.page_stack = QStackedWidget(sidebar)' not in contact_interface
+    assert 'self.detail_stack = QStackedWidget(self)' not in contact_interface
+    assert 'self.detail_stack.slide_to_widget(self.welcome_panel, direction="right")' in contact_interface
+    assert 'self.detail_stack.slide_to_widget(self.detail_panel, direction="right")' in contact_interface
+    assert 'self.page_stack.slide_to_widget(target, direction="right")' in contact_interface
     assert 'if reason == "user_profile_update":' in contact_interface
     assert 'if reason == "group_profile_update":' in contact_interface
     assert 'if reason == "group_self_profile_update":' in contact_interface
