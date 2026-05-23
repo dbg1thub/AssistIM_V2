@@ -78,9 +78,19 @@ class UserService:
                     normalized_fields["email_verified"] = True
                 else:
                     normalized_fields["email_verified"] = False
-        if all(getattr(current_user, key, None) == value for key, value in normalized_fields.items()):
+        nickname_changed = "nickname" in normalized_fields and getattr(current_user, "nickname", None) != normalized_fields["nickname"]
+        should_regenerate_avatar = nickname_changed and str(getattr(current_user, "avatar_kind", "") or "") == "generated"
+        if all(getattr(current_user, key, None) == value for key, value in normalized_fields.items()) and not should_regenerate_avatar:
             return self.serialize_user(current_user), False
-        user = self.users.update(current_user, **normalized_fields)
+        try:
+            user = self.users.update(current_user, commit=False, **normalized_fields)
+            if should_regenerate_avatar:
+                user = self.avatars.assign_generated_user_avatar(user, nickname=normalized_fields.get("nickname"), commit=False)
+            self.db.commit()
+            self.db.refresh(user)
+        except Exception:
+            self.db.rollback()
+            raise
         return self.serialize_user(user), True
 
     def record_profile_update_events(self, user: User) -> dict[str, object]:
@@ -138,7 +148,7 @@ class UserService:
             "nickname": nickname,
             "display_name": nickname or username or user.id,
             "avatar": self.avatars.resolve_user_avatar_url(user),
-            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
+            "avatar_kind": str(getattr(user, "avatar_kind", "generated") or "generated"),
             "gender": str(user.gender or ""),
             "region": getattr(user, "region", None),
             "signature": getattr(user, "signature", None),

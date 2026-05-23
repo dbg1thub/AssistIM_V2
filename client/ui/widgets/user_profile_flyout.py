@@ -857,7 +857,7 @@ class ProfileEditDialog(FluentDialog):
         avatar_actions.setSpacing(10)
         choose_button = PushButton(tr("profile.edit.avatar.choose", "Choose Avatar"), self)
         choose_button.clicked.connect(self._choose_avatar)
-        reset_button = PushButton(tr("profile.edit.avatar.reset", "Use Default Avatar"), self)
+        reset_button = PushButton(tr("profile.edit.avatar.reset", "Use Generated Avatar"), self)
         reset_button.clicked.connect(self._reset_avatar)
         avatar_actions.addWidget(choose_button, 0)
         avatar_actions.addWidget(reset_button, 0)
@@ -1061,7 +1061,7 @@ class ProfileEditDialog(FluentDialog):
         self._avatar_file_path = ""
         self._reset_avatar_requested = True
         self.avatar_path_label.setText(
-            tr("profile.edit.avatar.reset_pending", "Will restore the server default avatar after saving")
+            tr("profile.edit.avatar.reset_pending", "Will restore the server-generated avatar after saving")
         )
 
     def _email_changed(self) -> bool:

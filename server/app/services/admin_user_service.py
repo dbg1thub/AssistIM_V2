@@ -259,7 +259,7 @@ class AdminUserService:
             "nickname": nickname,
             "display_name": nickname or username or str(user.id or ""),
             "avatar": self.avatars.resolve_user_avatar_url(user),
-            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
+            "avatar_kind": str(getattr(user, "avatar_kind", "generated") or "generated"),
             "email": user.email,
             "email_verified": bool(getattr(user, "email_verified", False)),
             "phone": user.phone,

@@ -38,7 +38,9 @@ def test_auth_register_login_refresh_and_me(client: TestClient, auth_header) -> 
     assert register_user["email_verified"] is True
     assert register_user["birthday"] is None
     assert register_user["gender"] is None
-    assert register_user["avatar"].startswith("/uploads/default_avatars/avatar_default_")
+    assert register_user["avatar_kind"] == "generated"
+    assert register_user["avatar"].startswith("/uploads/generated_avatars/")
+    assert register_user["avatar"].endswith(".png")
 
     login_response = client.post(
         "/api/v1/auth/login",
@@ -557,8 +559,56 @@ def test_users_me_avatar_endpoints_replace_and_reset_avatar(client: TestClient, 
     )
     assert reset_response.status_code == 200
     reset_payload = reset_response.json()["data"]
-    assert reset_payload["avatar_kind"] == "default"
+    assert reset_payload["avatar_kind"] == "generated"
     assert reset_payload["avatar"] == default_avatar
+
+
+def test_update_me_regenerates_generated_avatar_on_nickname_change(client: TestClient, auth_header) -> None:
+    register_response = register_user_response(client, "generated-nickname-avatar", nickname="Alice")
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    access_token = payload["access_token"]
+    initial_avatar = payload["user"]["avatar"]
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"nickname": "Bob"},
+    )
+
+    assert update_response.status_code == 200
+    updated_user = update_response.json()["data"]
+    assert updated_user["nickname"] == "Bob"
+    assert updated_user["avatar_kind"] == "generated"
+    assert updated_user["avatar"].startswith("/uploads/generated_avatars/")
+    assert updated_user["avatar"] != initial_avatar
+
+
+def test_update_me_keeps_custom_avatar_on_nickname_change(client: TestClient, auth_header) -> None:
+    register_response = register_user_response(client, "custom-nickname-avatar", nickname="Alice")
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    access_token = payload["access_token"]
+
+    upload_response = client.post(
+        "/api/v1/users/me/avatar",
+        headers=auth_header(access_token),
+        files={"file": ("avatar.png", b"custom-avatar-bytes", "image/png")},
+    )
+    assert upload_response.status_code == 200
+    custom_avatar = upload_response.json()["data"]["avatar"]
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"nickname": "Bob"},
+    )
+
+    assert update_response.status_code == 200
+    updated_user = update_response.json()["data"]
+    assert updated_user["nickname"] == "Bob"
+    assert updated_user["avatar_kind"] == "custom"
+    assert updated_user["avatar"] == custom_avatar
 
 
 def test_user_avatar_change_regenerates_generated_group_avatar(client: TestClient, auth_header) -> None:
@@ -873,7 +923,7 @@ def test_force_login_ends_existing_call_runtime(client: TestClient, monkeypatch)
     assert hangup_payload["data"]["actor_id"] == user_id
 
 
-def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: TestClient, monkeypatch) -> None:
+def test_register_rolls_back_user_when_generated_avatar_assignment_fails(client: TestClient, monkeypatch) -> None:
     import pytest
 
     from app.core.database import SessionLocal
@@ -881,10 +931,10 @@ def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: T
     from app.services import auth_service as auth_service_module
     from app.services.avatar_service import AvatarService
 
-    def fail_default_avatar(self, user, *, seed="", gender="", commit=True):
-        raise RuntimeError("default avatar failed")
+    def fail_generated_avatar(self, user, *, nickname="", commit=True):
+        raise RuntimeError("generated avatar failed")
 
-    monkeypatch.setattr(AvatarService, "assign_default_user_avatar", fail_default_avatar)
+    monkeypatch.setattr(AvatarService, "assign_generated_user_avatar", fail_generated_avatar)
 
     with SessionLocal() as db:
         service = auth_service_module.AuthService(db)

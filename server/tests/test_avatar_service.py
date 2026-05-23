@@ -32,7 +32,6 @@ def test_backfill_user_avatar_state_keeps_missing_custom_avatar_stable() -> None
         id="user-1",
         username="alice",
         avatar_kind="custom",
-        avatar_default_key="",
         avatar_file_id="missing-file",
         avatar="/uploads/missing.png",
         gender="female",
@@ -44,41 +43,40 @@ def test_backfill_user_avatar_state_keeps_missing_custom_avatar_stable() -> None
     assert service.users.calls == []
 
 
-def test_assign_default_user_avatar_raises_internal_error_when_assets_missing(monkeypatch) -> None:
+def test_assign_generated_user_avatar_raises_internal_error_when_avatar_write_fails(monkeypatch) -> None:
     service = AvatarService(db=None)
-    user = SimpleNamespace(id="user-1", username="alice")
+    user = SimpleNamespace(id="user-1", username="alice", nickname="Alice")
 
-    monkeypatch.setattr("app.services.avatar_service.choose_seeded_default_avatar_key", lambda seed, gender="": "")
-    monkeypatch.setattr("app.services.avatar_service.choose_random_default_avatar_key", lambda gender="": "")
+    monkeypatch.setattr("app.services.avatar_service.build_generated_user_avatar", lambda *args, **kwargs: "")
 
     with pytest.raises(AppError) as exc_info:
-        service.assign_default_user_avatar(user, seed="user-1", commit=False)
+        service.assign_generated_user_avatar(user, nickname="Alice", commit=False)
 
     assert exc_info.value.code == ErrorCode.INTERNAL_ERROR
     assert exc_info.value.status_code == 500
-    assert exc_info.value.message == "default avatar assets unavailable"
+    assert exc_info.value.message == "generated avatar write failed"
 
 
-def test_assign_default_user_avatar_propagates_commit_flag(monkeypatch) -> None:
+def test_assign_generated_user_avatar_propagates_commit_flag(monkeypatch) -> None:
     service = AvatarService(db=None)
-    user = SimpleNamespace(id="user-1", username="alice")
+    user = SimpleNamespace(id="user-1", username="alice", nickname="Alice")
     recorded: dict[str, object] = {}
 
-    monkeypatch.setattr("app.services.avatar_service.choose_seeded_default_avatar_key", lambda seed, gender="": "avatar_default_female_01")
+    monkeypatch.setattr("app.services.avatar_service.build_generated_user_avatar", lambda *args, **kwargs: "/uploads/generated_avatars/user-1.png")
 
-    def fake_set_user_default_avatar(target_user, *, default_key: str, commit: bool = True):
+    def fake_set_user_generated_avatar(target_user, *, avatar_url: str, commit: bool = True):
         recorded["user"] = target_user
-        recorded["default_key"] = default_key
+        recorded["avatar_url"] = avatar_url
         recorded["commit"] = commit
         return target_user
 
-    monkeypatch.setattr(service, "set_user_default_avatar", fake_set_user_default_avatar)
+    monkeypatch.setattr(service, "set_user_generated_avatar", fake_set_user_generated_avatar)
 
-    result = service.assign_default_user_avatar(user, seed="user-1", commit=False)
+    result = service.assign_generated_user_avatar(user, nickname="Alice", commit=False)
 
     assert result is user
     assert recorded == {
         "user": user,
-        "default_key": "avatar_default_female_01",
+        "avatar_url": "/uploads/generated_avatars/user-1.png",
         "commit": False,
     }

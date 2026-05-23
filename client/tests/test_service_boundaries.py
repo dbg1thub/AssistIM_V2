@@ -2085,14 +2085,15 @@ def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_
         'id': 'user-1',
         'username': 'alice',
         'nickname': 'Alice',
-        'avatar': '/uploads/default_avatars/avatar_default_female_01.svg',
+        'avatar': '/uploads/generated_avatars/user-1_abcd1234.png',
+        'avatar_kind': 'generated',
         'gender': None,
     }
     fake_user_service = FakeUserService()
     fake_db = FakeDatabase()
     fake_message_manager = FakeMessageManager()
     fake_chat_controller = FakeChatControllerContext()
-    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/default-avatar.svg'})
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/generated-avatar.png'})
 
     monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
@@ -2111,7 +2112,8 @@ def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_
         assert fake_auth_service.register_calls == [('alice', 'Alice', 'secret', 'alice@example.test', '123456')]
         assert fake_file_service.avatar_uploads == []
         assert fake_user_service.update_calls == []
-        assert user['avatar'] == '/uploads/default_avatars/avatar_default_female_01.svg'
+        assert user['avatar'] == '/uploads/generated_avatars/user-1_abcd1234.png'
+        assert user['avatar_kind'] == 'generated'
         assert user['gender'] is None
         assert fake_message_manager.user_ids == []
         assert fake_chat_controller.user_ids == []
@@ -6300,7 +6302,7 @@ def test_file_service_reset_profile_avatar_uses_dedicated_endpoint(monkeypatch) 
 
         async def delete(self, path: str) -> dict:
             self.delete_calls.append(path)
-            return {'id': 'user-1', 'avatar': '/uploads/default-avatar.svg', 'avatar_kind': 'default'}
+            return {'id': 'user-1', 'avatar': '/uploads/generated_avatars/user-1.png', 'avatar_kind': 'generated'}
 
     fake_http = FakeUploadHttpClient()
     monkeypatch.setattr(file_service_module, 'get_http_client', lambda: fake_http)
@@ -6309,7 +6311,7 @@ def test_file_service_reset_profile_avatar_uses_dedicated_endpoint(monkeypatch) 
         service = file_service_module.FileService()
         payload = await service.reset_profile_avatar()
 
-        assert payload['avatar_kind'] == 'default'
+        assert payload['avatar_kind'] == 'generated'
         assert fake_http.delete_calls == ['/users/me/avatar']
 
     asyncio.run(scenario())
@@ -6321,7 +6323,7 @@ def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
     fake_db = FakeDatabase()
     fake_message_manager = FakeMessageManager()
     fake_chat_controller = FakeChatControllerContext()
-    fake_file_service = FakeFileService({'id': 'user-1', 'avatar': '/uploads/default-avatar.svg', 'avatar_kind': 'default'})
+    fake_file_service = FakeFileService({'id': 'user-1', 'avatar': '/uploads/generated_avatars/user-1.png', 'avatar_kind': 'generated'})
 
     monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
@@ -6338,7 +6340,7 @@ def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
         assert fake_file_service.avatar_resets == 1
         assert fake_file_service.avatar_uploads == []
         assert fake_user_service.update_calls == []
-        assert user['avatar_kind'] == 'default'
+        assert user['avatar_kind'] == 'generated'
         assert result.session_snapshot is not None
         assert result.session_snapshot.authoritative is True
         assert result.session_snapshot.unread_synchronized is True

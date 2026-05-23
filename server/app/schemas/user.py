@@ -16,7 +16,7 @@ class UserOut(ORMModel):
     username: str
     nickname: str
     avatar: str | None = None
-    avatar_kind: str = "default"
+    avatar_kind: str = "generated"
     email: str | None = None
     email_verified: bool = False
     phone: str | None = None

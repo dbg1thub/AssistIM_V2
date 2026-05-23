@@ -720,21 +720,24 @@ def test_session_encryption_backfill_migration_upgrades_legacy_plain_sessions() 
     }
 
 
-def test_svg_rasterizer_converts_default_avatar_to_png() -> None:
-    from app.media.svg_rasterizer import ensure_rasterized_svg
+def test_generated_user_avatar_builder_writes_png() -> None:
+    from types import SimpleNamespace
 
-    cache_dir = Path("server/.testdata/svg-raster-cache")
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    from app.media.generated_avatars import build_generated_user_avatar
 
-    svg_path = Path("client/resources/avatars/avatar_default_female_01.svg").resolve()
-    raster_path = ensure_rasterized_svg(svg_path, cache_dir, size=128)
+    upload_dir = Path("server/.testdata/generated-avatar-cache")
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-    assert raster_path is not None
-    assert raster_path.is_file()
-    assert raster_path.suffix == ".png"
-    assert raster_path.read_bytes().startswith(b"\x89PNG")
+    settings = SimpleNamespace(upload_dir=str(upload_dir), media_public_base_url="/uploads")
+    avatar_url = build_generated_user_avatar(settings, user_id="user-1", nickname="测试用户")
+    avatar_path = upload_dir / avatar_url.removeprefix("/uploads/")
+
+    assert avatar_url.startswith("/uploads/generated_avatars/user-1_")
+    assert avatar_url.endswith(".png")
+    assert avatar_path.is_file()
+    assert avatar_path.read_bytes().startswith(b"\x89PNG")
 
 
 
@@ -765,7 +768,6 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
     }
 
     assert "users.avatar_kind" in applied
-    assert "users.avatar_default_key" in applied
     assert "users.avatar_file_id" in applied
     assert "groups.announcement" in applied
     assert "groups.avatar_kind" in applied
@@ -773,15 +775,16 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
     assert "groups.avatar_version" in applied
     assert "group_members.group_nickname" in applied
     assert "group_members.note" in applied
-    assert {"avatar_kind", "avatar_default_key", "avatar_file_id"}.issubset(columns_by_table["users"])
+    assert {"avatar_kind", "avatar_file_id"}.issubset(columns_by_table["users"])
+    assert "avatar_default_key" not in columns_by_table["users"]
     assert {"announcement", "avatar_kind", "avatar_file_id", "avatar_version"}.issubset(columns_by_table["groups"])
     assert {"group_nickname", "note"}.issubset(columns_by_table["group_members"])
     assert {"id", "session_id", "user_id", "event_seq", "type", "payload", "created_at"}.issubset(columns_by_table["user_session_events"])
 
     with engine.begin() as connection:
-        user_row = connection.execute(text("SELECT avatar_kind, avatar_default_key FROM users WHERE id = 'user-1'")) .mappings().one()
-    assert user_row["avatar_kind"] == "default"
-    assert str(user_row["avatar_default_key"] or "") != ""
+        user_row = connection.execute(text("SELECT avatar_kind, avatar FROM users WHERE id = 'user-1'")) .mappings().one()
+    assert user_row["avatar_kind"] == "generated"
+    assert str(user_row["avatar"] or "").startswith("/uploads/generated_avatars/")
 
 
 def test_schema_compatibility_repairs_missing_group_announcement_columns_even_at_runtime_head() -> None:
@@ -796,7 +799,7 @@ def test_schema_compatibility_repairs_missing_group_announcement_columns_even_at
             text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
             {"revision": schema_compat_module.RUNTIME_SCHEMA_ALEMBIC_REVISION},
         )
-        connection.execute(text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, username VARCHAR(255), password_hash VARCHAR(255), nickname VARCHAR(255), avatar VARCHAR(255), avatar_kind VARCHAR(16), avatar_default_key VARCHAR(128), avatar_file_id VARCHAR(36), status VARCHAR(32), email VARCHAR(255), phone VARCHAR(32), birthday DATE, region VARCHAR(128), signature TEXT, gender VARCHAR(32), auth_session_version INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, username VARCHAR(255), password_hash VARCHAR(255), nickname VARCHAR(255), avatar VARCHAR(255), avatar_kind VARCHAR(16), avatar_file_id VARCHAR(36), status VARCHAR(32), email VARCHAR(255), phone VARCHAR(32), birthday DATE, region VARCHAR(128), signature TEXT, gender VARCHAR(32), auth_session_version INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP, updated_at TIMESTAMP)"))
         connection.execute(text("CREATE TABLE messages (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), sender_id VARCHAR(36), content TEXT, type VARCHAR(32), status VARCHAR(32), session_seq INTEGER NOT NULL DEFAULT 0, extra_json TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP, updated_at TIMESTAMP)"))
         connection.execute(text("CREATE TABLE sessions (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255), type VARCHAR(32), avatar VARCHAR(255), direct_key VARCHAR(255), is_ai_session BOOLEAN, encryption_mode VARCHAR(32) NOT NULL DEFAULT 'plain', last_message_seq INTEGER NOT NULL DEFAULT 0, last_event_seq INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP, updated_at TIMESTAMP)"))
         connection.execute(text("CREATE TABLE session_members (session_id VARCHAR(36), user_id VARCHAR(36), joined_at TIMESTAMP, last_read_seq INTEGER NOT NULL DEFAULT 0, last_read_message_id VARCHAR(36), last_read_at TIMESTAMP)"))

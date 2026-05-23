@@ -9,12 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, ErrorCode
-from app.media.default_avatars import (
-    choose_random_default_avatar_key,
-    choose_seeded_default_avatar_key,
-    default_avatar_key_from_url,
-    default_avatar_url,
-)
+from app.media.generated_avatars import build_generated_user_avatar
 from app.media.group_avatars import build_group_avatar, group_avatar_public_url, group_avatar_storage_key
 from app.models.file import StoredFile
 from app.models.group import Group
@@ -27,7 +22,7 @@ from app.services.file_service import FileService
 
 
 class AvatarService:
-    """Own default-avatar assignment, custom avatar uploads, and generated group avatars."""
+    """Own generated user avatars, custom avatar uploads, and generated group avatars."""
 
     def __init__(self, db: Session, settings: Settings | None = None) -> None:
         self.db = db
@@ -37,17 +32,21 @@ class AvatarService:
         self.groups = GroupRepository(db)
         self.sessions = SessionRepository(db)
 
-    def assign_default_user_avatar(self, user: User, *, seed: object = "", gender: object = "", commit: bool = True) -> User:
-        """Assign one persisted formal default avatar to a user."""
-        default_key = choose_seeded_default_avatar_key(seed, gender=gender) or choose_random_default_avatar_key(gender)
-        if not default_key:
-            raise AppError(ErrorCode.INTERNAL_ERROR, "default avatar assets unavailable", 500)
-        return self.set_user_default_avatar(user, default_key=default_key, commit=commit)
+    def assign_generated_user_avatar(self, user: User, *, nickname: object = "", commit: bool = True) -> User:
+        """Generate and persist one nickname-initial avatar for a user."""
+        avatar_url = build_generated_user_avatar(
+            self.settings,
+            user_id=getattr(user, "id", ""),
+            username=getattr(user, "username", ""),
+            nickname=nickname or getattr(user, "nickname", "") or getattr(user, "username", ""),
+        )
+        if not avatar_url:
+            raise AppError(ErrorCode.INTERNAL_ERROR, "generated avatar write failed", 500)
+        return self.set_user_generated_avatar(user, avatar_url=avatar_url, commit=commit)
 
     def backfill_user_avatar_state(self, user: User, *, commit: bool = True) -> User:
         """Normalize one legacy user row into the new avatar state model."""
         avatar_kind = str(getattr(user, "avatar_kind", "") or "").strip().lower()
-        avatar_default_key = str(getattr(user, "avatar_default_key", "") or "").strip()
         avatar_file_id = str(getattr(user, "avatar_file_id", "") or "").strip()
         avatar_value = str(getattr(user, "avatar", "") or "").strip()
 
@@ -57,7 +56,6 @@ class AvatarService:
                 return self.users.update_avatar_state(
                     user,
                     avatar_kind="custom",
-                    avatar_default_key=avatar_default_key or None,
                     avatar_file_id=stored.id,
                     avatar=stored.file_url,
                     commit=commit,
@@ -67,43 +65,26 @@ class AvatarService:
             # repair flows reconcile it later.
             return user
 
-        inferred_default_key = avatar_default_key or default_avatar_key_from_url(avatar_value)
-        if inferred_default_key:
-            return self.users.update_avatar_state(
-                user,
-                avatar_kind="default",
-                avatar_default_key=inferred_default_key,
-                avatar_file_id=None,
-                avatar=default_avatar_url(self.settings, inferred_default_key),
-                commit=commit,
-            )
-
-        if avatar_value:
+        if avatar_kind == "custom" and avatar_value:
             return self.users.update_avatar_state(
                 user,
                 avatar_kind="custom",
-                avatar_default_key=avatar_default_key or None,
                 avatar_file_id=avatar_file_id or None,
                 avatar=avatar_value,
                 commit=commit,
             )
 
-        return self.assign_default_user_avatar(
+        return self.assign_generated_user_avatar(
             user,
-            seed=getattr(user, "id", "") or getattr(user, "username", ""),
-            gender=getattr(user, "gender", ""),
+            nickname=getattr(user, "nickname", "") or getattr(user, "username", ""),
             commit=commit,
         )
 
-    def set_user_default_avatar(self, user: User, *, default_key: str, commit: bool = True) -> User:
-        """Switch one user back to the assigned default avatar."""
-        avatar_url = default_avatar_url(self.settings, default_key)
-        if not avatar_url:
-            raise AppError(ErrorCode.INVALID_REQUEST, "invalid default avatar key", 422)
+    def set_user_generated_avatar(self, user: User, *, avatar_url: str, commit: bool = True) -> User:
+        """Persist one server-generated user avatar URL."""
         updated = self.users.update_avatar_state(
             user,
-            avatar_kind="default",
-            avatar_default_key=default_key,
+            avatar_kind="generated",
             avatar_file_id=None,
             avatar=avatar_url,
             commit=commit,
@@ -112,15 +93,8 @@ class AvatarService:
         return updated
 
     def reset_user_avatar(self, user: User) -> User:
-        """Reset one user to the persisted formal default avatar."""
-        default_key = str(getattr(user, "avatar_default_key", "") or "").strip()
-        if not default_key:
-            return self.assign_default_user_avatar(
-                user,
-                seed=getattr(user, "id", "") or getattr(user, "username", ""),
-                gender=getattr(user, "gender", ""),
-            )
-        return self.set_user_default_avatar(user, default_key=default_key)
+        """Reset one user to a freshly generated nickname-initial avatar."""
+        return self.assign_generated_user_avatar(user, nickname=getattr(user, "nickname", "") or getattr(user, "username", ""))
 
     def upload_user_avatar(self, user: User, file: UploadFile) -> User:
         """Persist one custom profile avatar and bind it to the user."""
@@ -129,7 +103,6 @@ class AvatarService:
         updated = self.users.update_avatar_state(
             user,
             avatar_kind="custom",
-            avatar_default_key=str(getattr(user, "avatar_default_key", "") or "") or None,
             avatar_file_id=stored.id,
             avatar=stored.file_url,
         )
@@ -138,8 +111,7 @@ class AvatarService:
 
     def resolve_user_avatar_url(self, user: User) -> str | None:
         """Return the effective public avatar URL for one user."""
-        avatar_kind = str(getattr(user, "avatar_kind", "default") or "default").strip().lower()
-        avatar_default_key = str(getattr(user, "avatar_default_key", "") or "").strip()
+        avatar_kind = str(getattr(user, "avatar_kind", "generated") or "generated").strip().lower()
         avatar_value = str(getattr(user, "avatar", "") or "").strip()
         avatar_file_id = str(getattr(user, "avatar_file_id", "") or "").strip()
 
@@ -147,8 +119,6 @@ class AvatarService:
             stored = self.files.get_by_id(avatar_file_id)
             if stored is not None:
                 return stored.file_url
-        if avatar_kind == "default" and avatar_default_key:
-            return default_avatar_url(self.settings, avatar_default_key)
         return avatar_value or None
 
     def ensure_group_avatar(self, group: Group) -> str | None:

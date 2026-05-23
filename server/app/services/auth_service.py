@@ -56,10 +56,10 @@ class AuthService:
                 nickname=canonical_nickname,
                 email=verified_email,
                 email_verified=True,
-                avatar_kind="default",
+                avatar_kind="generated",
                 commit=False,
             )
-            user = self.avatars.assign_default_user_avatar(user, seed=user.id or canonical_username, commit=False)
+            user = self.avatars.assign_generated_user_avatar(user, nickname=canonical_nickname, commit=False)
             user = self.users.advance_auth_session_version(user, commit=False)
             self.db.commit()
             self.db.refresh(user)

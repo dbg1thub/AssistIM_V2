@@ -22,7 +22,6 @@ from app.core.rate_limit import rate_limiter
 from app.core.runtime_diagnostics import record_http_request
 from app.core.security import decode_access_token
 from app.dependencies.auth_dependency import get_current_user
-from app.media.default_avatars import sync_default_avatar_assets
 from app.media.storage import get_local_media_mount_path
 from app.models.user import User
 from app.repositories.file_repo import FileRepository
@@ -48,7 +47,7 @@ def _resolve_local_media_path(settings: Settings, storage_key: str) -> Path:
 
 def _is_server_generated_media(storage_key: str) -> bool:
     normalized_key = (storage_key or "").strip().replace("\\", "/").lstrip("/")
-    return normalized_key.startswith(("default_avatars/", "group_avatars/"))
+    return normalized_key.startswith(("generated_avatars/", "group_avatars/"))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -57,7 +56,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_database(current_settings)
     rate_limiter.configure_from_settings(current_settings)
     os.makedirs(current_settings.upload_dir, exist_ok=True)
-    sync_default_avatar_assets(current_settings)
 
     @asynccontextmanager
     async def app_lifespan(_: FastAPI):

@@ -102,7 +102,7 @@ class FileService:
         return dict(payload)
 
     async def reset_profile_avatar(self) -> dict[str, Any]:
-        """Reset the current user's avatar to the server-assigned default avatar."""
+        """Reset the current user's avatar to the server-generated avatar."""
         payload = await self._http.delete(self.PROFILE_AVATAR_UPLOAD_PATH)
         if not isinstance(payload, dict):
             logger.error("Avatar reset response must be a JSON object: %r", payload)

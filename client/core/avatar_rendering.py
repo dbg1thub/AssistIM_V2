@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QRect, QSize, Signal, Qt, QUrl
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from client.core.avatar_utils import default_avatar_path, resolve_avatar_source
+from client.core.avatar_utils import resolve_avatar_source
 from client.core.image_cache import get_image_cache
 
 
@@ -49,10 +49,9 @@ class AvatarImageStore(QObject):
 
     def display_path_for_source(self, source: object = "", *, gender: object = "", seed: object = "") -> str:
         """Return one local path for the avatar source, kicking off remote downloads when needed."""
-        fallback_path = default_avatar_path(gender=gender, seed=seed)
         text = str(source or "").strip()
         if not text:
-            return fallback_path
+            return ""
 
         if is_remote_avatar_source(text):
             cached_pixmap = self._cache.load_image(text)
@@ -60,12 +59,12 @@ class AvatarImageStore(QObject):
             if cached_pixmap is not None and cache_path.exists():
                 return str(cache_path)
             self._ensure_remote_download(text)
-            return fallback_path
+            return ""
 
         candidate = Path(text)
         if candidate.is_file():
             return str(candidate)
-        return fallback_path
+        return ""
 
     def _ensure_remote_download(self, url: str) -> None:
         if not url or url in self._pending_urls:

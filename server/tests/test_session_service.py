@@ -108,10 +108,10 @@ class FakeMessageRepo:
 class FakeUserRepo:
     def __init__(self) -> None:
         self.users_by_id = {
-            'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar='/uploads/alice.png', gender='female', avatar_kind='default'),
+            'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar='/uploads/alice.png', gender='female', avatar_kind='generated'),
             'bob': SimpleNamespace(id='bob', nickname='Bob', username='bob', avatar='/uploads/bob.png', gender='male', avatar_kind='custom'),
             'charlie': SimpleNamespace(id='charlie', nickname='Charlie', username='charlie', avatar='/uploads/charlie.png', gender='male', avatar_kind='custom'),
-            'dave': SimpleNamespace(id='dave', nickname='Dave', username='dave', avatar='', gender='', avatar_kind='default'),
+            'dave': SimpleNamespace(id='dave', nickname='Dave', username='dave', avatar='', gender='', avatar_kind='generated'),
         }
         self.list_users_by_ids_calls: list[list[str]] = []
 

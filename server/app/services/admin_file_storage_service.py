@@ -17,7 +17,7 @@ from app.models.user import User
 from app.services.admin_audit_service import AdminAuditService
 
 
-SERVER_GENERATED_MEDIA_PREFIXES = ("default_avatars/", "group_avatars/")
+SERVER_GENERATED_MEDIA_PREFIXES = ("generated_avatars/", "group_avatars/")
 
 
 @dataclass(slots=True)

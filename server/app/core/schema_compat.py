@@ -11,7 +11,8 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SAWarning
 
-from app.media.default_avatars import choose_seeded_default_avatar_key, default_avatar_key_from_url
+from app.core.config import get_settings
+from app.media.generated_avatars import build_generated_user_avatar
 
 USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "email": "VARCHAR(255)",
@@ -32,8 +33,7 @@ USER_ADMIN_COLUMN_DDL: dict[str, str] = {
 }
 
 USER_AVATAR_COLUMN_DDL: dict[str, str] = {
-    "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'default'",
-    "avatar_default_key": "VARCHAR(128)",
+    "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'generated'",
     "avatar_file_id": "VARCHAR(36)",
 }
 
@@ -209,7 +209,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260509_0023"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260524_0025"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -1197,14 +1197,14 @@ def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> N
     if "users" not in _get_table_names(connection):
         return
 
-    required_columns = {"avatar_kind", "avatar_default_key", "avatar_file_id", "avatar"}
+    required_columns = {"avatar_kind", "avatar_file_id", "avatar"}
     if not required_columns.issubset(_get_column_names(connection, "users")):
         return
 
     rows = connection.execute(
         text(
             """
-            SELECT id, username, gender, avatar, avatar_kind, avatar_default_key, avatar_file_id
+            SELECT id, username, nickname, avatar, avatar_kind, avatar_file_id
             FROM users
             ORDER BY created_at ASC, id ASC
             """
@@ -1212,35 +1212,28 @@ def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> N
     ).mappings().all()
 
     touched = False
+    settings = get_settings()
     for row in rows:
         avatar_value = str(row["avatar"] or "").strip()
         avatar_kind = str(row["avatar_kind"] or "").strip().lower()
-        avatar_default_key = str(row["avatar_default_key"] or "").strip()
         avatar_file_id = str(row["avatar_file_id"] or "").strip() or None
 
-        inferred_default_key = avatar_default_key or default_avatar_key_from_url(avatar_value)
-        if inferred_default_key:
-            resolved_kind = "default"
-            resolved_default_key = inferred_default_key
-            resolved_file_id = None
-            resolved_avatar = avatar_value or f"/uploads/default_avatars/{inferred_default_key}"
-        elif avatar_value:
+        if avatar_kind == "custom" and avatar_value:
             resolved_kind = "custom"
-            resolved_default_key = avatar_default_key or None
             resolved_file_id = avatar_file_id
             resolved_avatar = avatar_value
         else:
-            resolved_kind = "default"
-            resolved_default_key = choose_seeded_default_avatar_key(
-                str(row["id"] or "") or str(row["username"] or ""),
-                gender=row["gender"],
-            )
+            resolved_kind = "generated"
             resolved_file_id = None
-            resolved_avatar = f"/uploads/default_avatars/{resolved_default_key}" if resolved_default_key else None
+            resolved_avatar = build_generated_user_avatar(
+                settings,
+                user_id=row["id"],
+                username=row["username"],
+                nickname=row["nickname"],
+            )
 
         if (
             avatar_kind != resolved_kind
-            or avatar_default_key != str(resolved_default_key or "")
             or str(avatar_file_id or "") != str(resolved_file_id or "")
             or avatar_value != str(resolved_avatar or "")
         ):
@@ -1249,7 +1242,6 @@ def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> N
                     """
                     UPDATE users
                     SET avatar_kind = :avatar_kind,
-                        avatar_default_key = :avatar_default_key,
                         avatar_file_id = :avatar_file_id,
                         avatar = :avatar
                     WHERE id = :user_id
@@ -1257,7 +1249,6 @@ def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> N
                 ),
                 {
                     "avatar_kind": resolved_kind,
-                    "avatar_default_key": resolved_default_key,
                     "avatar_file_id": resolved_file_id,
                     "avatar": resolved_avatar,
                     "user_id": row["id"],
