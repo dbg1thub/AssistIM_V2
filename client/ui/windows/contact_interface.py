@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
@@ -539,6 +539,8 @@ class FriendMomentPreviewStrip(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def _load_tile(self, tile: QLabel, media: MomentMediaRecord) -> None:
@@ -977,8 +979,14 @@ class GalleryContactDetailPanel(QWidget):
 class FriendMomentsDialog(FluentDialog):
     """Placeholder dialog for one friend's moments timeline."""
 
+    DIALOG_WIDTH = 620
+    MIN_DIALOG_HEIGHT = 560
+
     def __init__(self, contact: ContactRecord, parent=None):
         self._contact = contact
+        self._resize_active = False
+        self._resize_start_global_y = 0
+        self._resize_start_height = 0
         display_name = str(contact.display_name or contact.username or contact.id or "").strip()
         title = tr(
             "contact.friend_moments.title",
@@ -988,8 +996,28 @@ class FriendMomentsDialog(FluentDialog):
         super().__init__(parent=parent, title=title)
         self.setObjectName("FriendMomentsDialog")
         self.setWindowTitle(title)
-        self.resize(620, 720)
-        self.setMinimumSize(520, 560)
+        self.resize(self.DIALOG_WIDTH, 720)
+        self.setFixedWidth(self.DIALOG_WIDTH)
+        self.setMinimumHeight(self.MIN_DIALOG_HEIGHT)
+
+        self.back_button = TransparentToolButton(CollectionIcon("arrow_left"), self.title_bar)
+        self.back_button.setObjectName("friendMomentsBackButton")
+        self.back_button.setFixedSize(48, 48)
+        self.back_button.setIconSize(QSize(18, 18))
+        self.back_button.setToolTip(tr("common.back", "Back"))
+        self.back_button.clicked.connect(self.close)
+
+        self.minimize_button = TransparentToolButton(CollectionIcon("subtract"), self.title_bar)
+        self.minimize_button.setObjectName("friendMomentsMinimizeButton")
+        self.minimize_button.setFixedSize(48, 48)
+        self.minimize_button.setIconSize(QSize(18, 18))
+        self.minimize_button.setToolTip(tr("common.minimize", "Minimize"))
+        self.minimize_button.clicked.connect(self.showMinimized)
+
+        title_layout = self.title_bar.layout()
+        if isinstance(title_layout, QHBoxLayout):
+            title_layout.insertWidget(0, self.back_button, 0, Qt.AlignmentFlag.AlignTop)
+            title_layout.insertWidget(title_layout.count() - 1, self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)
 
         root = self.content_layout
         root.setContentsMargins(24, 24, 24, 24)
@@ -1006,6 +1034,32 @@ class FriendMomentsDialog(FluentDialog):
         root.addStretch(1)
         root.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
         root.addStretch(1)
+
+        self.vertical_resize_handle = QWidget(self.content_widget)
+        self.vertical_resize_handle.setObjectName("friendMomentsVerticalResizeHandle")
+        self.vertical_resize_handle.setFixedHeight(10)
+        self.vertical_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.vertical_resize_handle.installEventFilter(self)
+        root.addWidget(self.vertical_resize_handle)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.vertical_resize_handle:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._resize_active = True
+                self._resize_start_global_y = event.globalPosition().toPoint().y()
+                self._resize_start_height = self.height()
+                event.accept()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._resize_active:
+                delta_y = event.globalPosition().toPoint().y() - self._resize_start_global_y
+                self.resize(self.width(), self._resize_start_height + delta_y)
+                event.accept()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and self._resize_active:
+                self._resize_active = False
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
 
 class UserSearchItem(CardWidget):

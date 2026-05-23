@@ -602,6 +602,13 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'super().__init__(parent=parent, title=title)' in contact_interface
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
+    assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
+    assert 'self.minimize_button = TransparentToolButton(CollectionIcon("subtract"), self.title_bar)' in contact_interface
+    assert 'self.back_button = TransparentToolButton(CollectionIcon("arrow_left"), self.title_bar)' in contact_interface
+    assert 'self.vertical_resize_handle = QWidget(self.content_widget)' in contact_interface
+    assert 'self.vertical_resize_handle.installEventFilter(self)' in contact_interface
+    assert 'self.resize(self.width(), self._resize_start_height + delta_y)' in contact_interface
+    assert 'event.accept()' in contact_interface.split('class FriendMomentPreviewStrip(QWidget):', 1)[1].split('def _load_tile', 1)[0]
     assert 'dialog = FriendMomentsDialog(contact, self.window())' in contact_interface
     assert 'dialog.show()' in contact_interface
     assert 'contact.detail.moments_coming_soon' not in contact_interface
