@@ -71,6 +71,7 @@ from client.ui.controllers.discovery_controller import (
 )
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
@@ -2101,6 +2102,7 @@ class MomentsFeedToolbar(QWidget):
 
     refresh_requested = Signal()
     notifications_requested = Signal()
+    filter_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2144,6 +2146,7 @@ class MomentsFeedToolbar(QWidget):
 
     def _set_active_filter(self, route_key: str) -> None:
         self.feed_filter.setCurrentItem(route_key)
+        self.filter_changed.emit(route_key)
 
 
 class MomentsComposePrompt(BodyLabel):
@@ -2237,8 +2240,92 @@ class MomentsFeedList(QWidget):
         layout.addWidget(self.scroll_area, 1)
 
 
+class MomentsPlaceholderPage(QWidget):
+    """Placeholder page for moments sections that are not wired yet."""
+
+    def __init__(self, title: str, description: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsPlaceholderPage")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
+
+        title_label = BodyLabel(title, self)
+        title_label.setObjectName("MomentsPlaceholderTitle")
+        description_label = CaptionLabel(description, self)
+        description_label.setObjectName("MomentsPlaceholderDescription")
+        description_label.setWordWrap(True)
+
+        layout.addStretch(1)
+        layout.addWidget(title_label, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(description_label, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+
+
+class MomentsFeedPage(QWidget):
+    """Friends feed page with tabbed animated feed content."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MomentsFeedPage")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.toolbar = MomentsFeedToolbar(self)
+        self.compose_bar = MomentsComposeBar(self)
+        self.feed_stack = AnimatedStackWidget(self)
+        self.all_feed_list = MomentsFeedList(self.feed_stack)
+        self.media_page = MomentsPlaceholderPage(
+            tr("discovery.feed.tab_media", "Media"),
+            tr("discovery.feed.media_placeholder", "Media moments will be shown here."),
+            self.feed_stack,
+        )
+        self.links_page = MomentsPlaceholderPage(
+            tr("discovery.feed.tab_links", "Links"),
+            tr("discovery.feed.links_placeholder", "Link moments will be shown here."),
+            self.feed_stack,
+        )
+
+        self.feed_stack.addWidget(self.all_feed_list)
+        self.feed_stack.addWidget(self.media_page)
+        self.feed_stack.addWidget(self.links_page)
+
+        layout.addWidget(self.toolbar, 0)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        layout.addWidget(self.compose_bar, 0)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        layout.addWidget(self.feed_stack, 1)
+
+        self.refresh_button = self.toolbar.refresh_button
+        self.notifications_button = self.toolbar.notifications_button
+        self.publish_button = self.compose_bar.publish_button
+        self.summary_label = None
+        self.scroll_area = self.all_feed_list.scroll_area
+        self.feed_container = self.all_feed_list.feed_container
+        self.feed_layout = self.all_feed_list.feed_layout
+
+        self.toolbar.filter_changed.connect(self.switch_filter)
+
+    def switch_filter(self, route_key: str) -> None:
+        page_map = {
+            "all": self.all_feed_list,
+            "media": self.media_page,
+            "links": self.links_page,
+        }
+        target = page_map.get(route_key, self.all_feed_list)
+        self.feed_stack.slide_to_widget(target, direction="right")
+
+
 class MomentsFeedPanel(QWidget):
-    """Center panel containing toolbar, compose bar, and the scrollable feed."""
+    """Center panel containing animated moments pages."""
 
     refresh_requested = Signal()
     publish_requested = Signal()
@@ -2253,28 +2340,64 @@ class MomentsFeedPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.toolbar = MomentsFeedToolbar(self)
-        self.compose_bar = MomentsComposeBar(self)
-        self.feed_list = MomentsFeedList(self)
-        layout.addWidget(self.toolbar, 0)
-        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
-        layout.addWidget(self.compose_bar, 0)
-        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
-        layout.addWidget(self.feed_list, 1)
+        self.page_stack = AnimatedStackWidget(self)
+        self.friends_feed_page = MomentsFeedPage(self.page_stack)
+        self.my_moments_page = MomentsPlaceholderPage(
+            tr("discovery.nav.mine", "My Moments"),
+            tr("discovery.nav.mine_placeholder", "Your moments page will be shown here."),
+            self.page_stack,
+        )
+        self.placeholder_pages: dict[str, MomentsPlaceholderPage] = {
+            "likes": MomentsPlaceholderPage(
+                tr("discovery.nav.likes", "My Likes"),
+                tr("discovery.nav.likes_placeholder", "Liked moments will be shown here."),
+                self.page_stack,
+            ),
+            "saved": MomentsPlaceholderPage(
+                tr("discovery.nav.saved", "Saved"),
+                tr("discovery.nav.saved_placeholder", "Saved moments will be shown here."),
+                self.page_stack,
+            ),
+            "albums": MomentsPlaceholderPage(
+                tr("discovery.nav.albums", "Albums"),
+                tr("discovery.nav.albums_placeholder", "Albums will be shown here."),
+                self.page_stack,
+            ),
+            "footprints": MomentsPlaceholderPage(
+                tr("discovery.nav.footprints", "Footprints"),
+                tr("discovery.nav.footprints_placeholder", "Footprints will be shown here."),
+                self.page_stack,
+            ),
+        }
 
-        self.refresh_button = self.toolbar.refresh_button
-        self.notifications_button = self.toolbar.notifications_button
-        self.publish_button = self.compose_bar.publish_button
-        self.summary_label = None
-        self.scroll_area = self.feed_list.scroll_area
-        self.feed_container = self.feed_list.feed_container
-        self.feed_layout = self.feed_list.feed_layout
+        self.page_stack.addWidget(self.friends_feed_page)
+        self.page_stack.addWidget(self.my_moments_page)
+        for page in self.placeholder_pages.values():
+            self.page_stack.addWidget(page)
+        layout.addWidget(self.page_stack, 1)
 
-        self.toolbar.refresh_requested.connect(self.refresh_requested.emit)
-        self.toolbar.notifications_requested.connect(self.notifications_requested.emit)
-        self.compose_bar.publish_requested.connect(self.publish_requested.emit)
-        self.compose_bar.image_requested.connect(self.publish_requested.emit)
-        self.compose_bar.link_requested.connect(self.publish_requested.emit)
+        self.refresh_button = self.friends_feed_page.refresh_button
+        self.notifications_button = self.friends_feed_page.notifications_button
+        self.publish_button = self.friends_feed_page.publish_button
+        self.summary_label = self.friends_feed_page.summary_label
+        self.scroll_area = self.friends_feed_page.scroll_area
+        self.feed_container = self.friends_feed_page.feed_container
+        self.feed_layout = self.friends_feed_page.feed_layout
+
+        self.friends_feed_page.toolbar.refresh_requested.connect(self.refresh_requested.emit)
+        self.friends_feed_page.toolbar.notifications_requested.connect(self.notifications_requested.emit)
+        self.friends_feed_page.compose_bar.publish_requested.connect(self.publish_requested.emit)
+        self.friends_feed_page.compose_bar.image_requested.connect(self.publish_requested.emit)
+        self.friends_feed_page.compose_bar.link_requested.connect(self.publish_requested.emit)
+
+    def switch_page(self, route_key: str) -> None:
+        page_map: dict[str, QWidget] = {
+            "feed": self.friends_feed_page,
+            "mine": self.my_moments_page,
+            **self.placeholder_pages,
+        }
+        target = page_map.get(route_key, self.friends_feed_page)
+        self.page_stack.slide_to_widget(target, direction="right")
 
 
 class MomentsRightPanel(QWidget):
@@ -2455,6 +2578,7 @@ class DiscoveryInterface(QWidget):
     def _connect_signals(self) -> None:
         self.feed_panel.refresh_requested.connect(self.reload_data)
         self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)
+        self.left_panel.nav_changed.connect(self.feed_panel.switch_page)
         self.feed_panel.notifications_requested.connect(self._open_notifications_dialog)
         self.feed_panel.publish_requested.connect(self._open_publish_dialog)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)

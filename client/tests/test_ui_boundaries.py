@@ -428,6 +428,7 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
 
 def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    animated_stack = Path('client/ui/widgets/animated_stack.py').read_text(encoding='utf-8')
     qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
     moment_card_block = discovery_interface.split('class MomentCard(QWidget):', 1)[1].split(
         'class MomentsCoverBanner(QFrame):',
@@ -449,6 +450,10 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
         'class MomentsComposePrompt(BodyLabel):',
         1,
     )[0]
+    feed_page_block = discovery_interface.split('class MomentsFeedPage(QWidget):', 1)[1].split(
+        'class MomentsFeedPanel(QWidget):',
+        1,
+    )[0]
     compose_bar_block = discovery_interface.split('class MomentsComposeBar(QWidget):', 1)[1].split(
         'class MomentsFeedList(QWidget):',
         1,
@@ -462,10 +467,22 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
         1,
     )[0]
 
+    assert 'class AnimatedStackWidget(QStackedWidget):' in animated_stack
+    assert 'def __init__(self, parent=None, *, duration_ms: int = 280):' in animated_stack
+    assert 'def slide_to_widget(self, target: QWidget, *, direction: str = "right") -> None:' in animated_stack
+    assert 'QPropertyAnimation(current, b"pos", self)' in animated_stack
+    assert 'QPropertyAnimation(target, b"pos", self)' in animated_stack
+    assert 'QEasingCurve.Type.InOutCubic' in animated_stack
+    assert 'QEasingCurve.Type.OutCubic' not in animated_stack
+    assert 'target_start = QPoint(-width, 0) if direction == "right" else QPoint(width, 0)' in animated_stack
+    assert 'current_end = QPoint(width, 0) if direction == "right" else QPoint(-width, 0)' in animated_stack
+    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in discovery_interface
     assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in discovery_interface
     assert 'MOMENTS_PANEL_CONTENT_MARGIN = 12' in discovery_interface
     assert 'MOMENTS_PANEL_CONTENT_SPACING = 12' in discovery_interface
     assert 'class MomentsLeftPanel(QWidget):' in discovery_interface
+    assert 'class MomentsPlaceholderPage(QWidget):' in discovery_interface
+    assert 'class MomentsFeedPage(QWidget):' in discovery_interface
     assert 'class MomentsFeedPanel(QWidget):' in discovery_interface
     assert 'class MomentsRightPanel(QWidget):' in discovery_interface
     assert 'class MomentsProfileBlock(QWidget):' in discovery_interface
@@ -495,6 +512,7 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.feed_panel.publish_requested.connect(self._open_publish_dialog)' in discovery_interface
     assert 'self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)' in discovery_interface
     assert 'self.feed_panel.refresh_requested.connect(self.reload_data)' in discovery_interface
+    assert 'self.left_panel.nav_changed.connect(self.feed_panel.switch_page)' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
     assert 'footer_layout.addWidget(FluentDivider(footer, variant=FluentDivider.FULL' in discovery_interface
     assert 'layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL' in discovery_interface
@@ -506,6 +524,17 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'layout.setSpacing(0)' in left_panel_block
     assert 'layout.setContentsMargins(0, 0, 0, 0)' in feed_panel_block
     assert 'layout.setSpacing(0)' in feed_panel_block
+    assert 'self.page_stack = AnimatedStackWidget(self)' in feed_panel_block
+    assert 'self.friends_feed_page = MomentsFeedPage(self.page_stack)' in feed_panel_block
+    assert 'self.my_moments_page = MomentsPlaceholderPage(' in feed_panel_block
+    assert 'self.placeholder_pages: dict[str, MomentsPlaceholderPage] = {' in feed_panel_block
+    assert '"likes": MomentsPlaceholderPage(' in feed_panel_block
+    assert '"saved": MomentsPlaceholderPage(' in feed_panel_block
+    assert '"albums": MomentsPlaceholderPage(' in feed_panel_block
+    assert '"footprints": MomentsPlaceholderPage(' in feed_panel_block
+    assert 'self.page_stack.addWidget(self.friends_feed_page)' in feed_panel_block
+    assert 'self.page_stack.addWidget(self.my_moments_page)' in feed_panel_block
+    assert 'self.page_stack.slide_to_widget(target, direction="right")' in feed_panel_block
     assert 'layout.setContentsMargins(0, 0, 0, 0)' in right_panel_block
     assert 'layout.setSpacing(0)' in right_panel_block
     assert (
@@ -575,7 +604,18 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in right_panel_block
     assert 'self.feed_filter = SegmentedWidget(self)' in discovery_interface
     assert 'self.feed_filter.addItem(routeKey="all"' in discovery_interface
+    assert 'filter_changed = Signal(str)' in feed_toolbar_block
     assert 'self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"))' in discovery_interface
+    assert 'self.filter_changed.emit(route_key)' in feed_toolbar_block
+    assert 'self.feed_stack = AnimatedStackWidget(self)' in feed_page_block
+    assert 'self.all_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
+    assert 'self.media_page = MomentsPlaceholderPage(' in feed_page_block
+    assert 'self.links_page = MomentsPlaceholderPage(' in feed_page_block
+    assert 'self.feed_stack.addWidget(self.all_feed_list)' in feed_page_block
+    assert 'self.feed_stack.addWidget(self.media_page)' in feed_page_block
+    assert 'self.feed_stack.addWidget(self.links_page)' in feed_page_block
+    assert 'self.toolbar.filter_changed.connect(self.switch_filter)' in feed_page_block
+    assert 'self.feed_stack.slide_to_widget(target, direction="right")' in feed_page_block
     assert 'icon=AppIcon.HOME' not in discovery_interface
     assert 'icon=AppIcon.PHOTO' not in discovery_interface
     assert 'icon=AppIcon.ATTACH' not in discovery_interface
