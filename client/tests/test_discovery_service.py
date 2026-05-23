@@ -214,7 +214,7 @@ def test_discovery_service_fetches_and_marks_moment_notifications_read(monkeypat
         payload = await service.fetch_moment_notifications(unread_only=True)
         read_payload = await service.mark_moment_notifications_read(["notice-1"])
 
-        assert fake_http.get_calls == [("/moments/notifications", {"unread_only": True})]
+        assert fake_http.get_calls == [("/moments/notifications", {"unread_only": "true"})]
         assert fake_http.post_calls == [
             ("/moments/notifications/read", {"notification_ids": ["notice-1"]})
         ]

@@ -234,7 +234,15 @@ class AuthController:
             return None
         except ServerError as exc:
             logger.warning("Transient server error while restoring auth session: %s", exc)
-            return await self._restore_from_cached_profile(
+            return await self._reject_restore_without_authoritative_user(
+                stored_profile=stored_profile,
+                stored_user_id=stored_user_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+            )
+        except NetworkError as exc:
+            logger.warning("Network error while restoring auth session: %s", exc)
+            return await self._reject_restore_without_authoritative_user(
                 stored_profile=stored_profile,
                 stored_user_id=stored_user_id,
                 access_token=access_token,
@@ -246,15 +254,7 @@ class AuthController:
                 await self.clear_session(clear_local_chat_state=False)
                 return None
             logger.warning("Transient API error while restoring auth session: %s", exc)
-            return await self._restore_from_cached_profile(
-                stored_profile=stored_profile,
-                stored_user_id=stored_user_id,
-                access_token=access_token,
-                refresh_token=refresh_token,
-            )
-        except NetworkError as exc:
-            logger.warning("Network error while restoring auth session: %s", exc)
-            return await self._restore_from_cached_profile(
+            return await self._reject_restore_without_authoritative_user(
                 stored_profile=stored_profile,
                 stored_user_id=stored_user_id,
                 access_token=access_token,
@@ -284,7 +284,7 @@ class AuthController:
         self._schedule_e2ee_device_bootstrap()
         return user
 
-    async def _restore_from_cached_profile(
+    async def _reject_restore_without_authoritative_user(
         self,
         *,
         stored_profile: str,
@@ -292,17 +292,49 @@ class AuthController:
         access_token: str,
         refresh_token: str,
     ) -> dict[str, Any] | None:
-        """Restore from the local profile only when the persisted snapshot is internally consistent."""
-        cached_user = self._load_cached_user_profile(stored_profile, expected_user_id=stored_user_id)
-        if cached_user and self._refresh_token_matches_user(refresh_token, cached_user, access_token=access_token):
-            self._authoritative_profile_refresh_pending = True
-            self._apply_runtime_context(cached_user, authoritative=False)
-            self._schedule_e2ee_device_bootstrap()
-            return cached_user
+        """Reject offline restore while preserving one internally consistent persisted snapshot."""
+        if self._cached_profile_matches_token_snapshot(
+            stored_profile=stored_profile,
+            stored_user_id=stored_user_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        ):
+            self._clear_uncommitted_restore_context()
+            return None
 
         logger.warning("Persisted cached auth profile does not match token snapshot, clearing persisted auth state")
         await self.clear_session(clear_local_chat_state=False)
         return None
+
+    def _cached_profile_matches_token_snapshot(
+        self,
+        *,
+        stored_profile: str,
+        stored_user_id: str,
+        access_token: str,
+        refresh_token: str,
+    ) -> bool:
+        cached_user = self._load_cached_user_profile(stored_profile, expected_user_id=stored_user_id)
+        return bool(
+            cached_user
+            and self._refresh_token_matches_user(
+                refresh_token,
+                cached_user,
+                access_token=access_token,
+            )
+        )
+
+    def _clear_uncommitted_restore_context(self) -> None:
+        """Discard tokens applied for backend validation without deleting persisted auth state."""
+        had_runtime_user = self._current_user is not None
+        self._cancel_pending_task(self._e2ee_bootstrap_task)
+        self._e2ee_bootstrap_task = None
+        self._authoritative_profile_refresh_pending = False
+        self._clear_http_tokens()
+        self._current_user = None
+        if had_runtime_user:
+            self._set_runtime_user_id("")
+            self._notify_auth_state_changed()
 
     async def refresh_current_user_profile_if_needed(self) -> dict[str, Any] | None:
         """Replace one cached restore profile with the backend-authoritative user snapshot when possible."""

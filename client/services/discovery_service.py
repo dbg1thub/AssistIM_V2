@@ -109,7 +109,7 @@ class DiscoveryService:
         """Fetch the current user's moment interaction notifications."""
         payload = await self._http.get(
             "/moments/notifications",
-            params={"unread_only": True} if unread_only else None,
+            params={"unread_only": "true"} if unread_only else None,
         )
         if not isinstance(payload, dict):
             logger.warning("Unexpected moment notifications payload: %r", payload)

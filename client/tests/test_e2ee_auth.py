@@ -460,7 +460,7 @@ def test_auth_controller_restore_rejects_refresh_token_for_different_user(monkey
     asyncio.run(scenario())
 
 
-def test_auth_controller_restore_recovers_from_server_error_with_consistent_cached_profile(monkeypatch) -> None:
+def test_auth_controller_restore_rejects_server_error_without_committing_cached_profile(monkeypatch) -> None:
     fake_auth_service = boundaries.FakeAuthService()
     fake_db = boundaries.FakeDatabase()
     fake_e2ee_service, fake_message_manager, fake_chat_controller = _wire_auth_controller(
@@ -486,20 +486,22 @@ def test_auth_controller_restore_recovers_from_server_error_with_consistent_cach
         )
 
         restored = await controller.restore_session()
-        await asyncio.sleep(0)
 
-        assert restored == {"id": "user-1", "username": "alice"}
-        assert fake_auth_service.access_token == access_token
-        assert fake_auth_service.refresh_token == refresh_token
-        assert controller.current_user == {"id": "user-1", "username": "alice"}
+        assert restored is None
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert controller.current_user is None
+        assert fake_db.app_state[controller.ACCESS_TOKEN_KEY]
+        assert fake_db.app_state[controller.REFRESH_TOKEN_KEY]
+        assert fake_db.app_state[controller.USER_ID_KEY] == "user-1"
         assert fake_message_manager.user_ids == []
         assert fake_chat_controller.user_ids == []
-        assert fake_e2ee_service.calls == 1
+        assert fake_e2ee_service.calls == 0
 
     asyncio.run(scenario())
 
 
-def test_auth_controller_refreshes_cached_restore_profile_when_network_recovers(monkeypatch) -> None:
+def test_auth_controller_restore_rejects_network_error_without_committing_cached_profile(monkeypatch) -> None:
     fake_auth_service = boundaries.FakeAuthService()
     fake_db = boundaries.FakeDatabase()
     fake_e2ee_service, fake_message_manager, fake_chat_controller = _wire_auth_controller(
@@ -525,26 +527,18 @@ def test_auth_controller_refreshes_cached_restore_profile_when_network_recovers(
         )
 
         restored = await controller.restore_session()
-        await asyncio.sleep(0)
 
-        assert restored == {"id": "user-1", "username": "alice", "nickname": "Cached Alice"}
-        assert controller.has_pending_authoritative_profile_refresh() is True
-        assert fake_auth_service.access_token == access_token
-        assert fake_auth_service.refresh_token == refresh_token
+        assert restored is None
+        assert controller.current_user is None
+        assert controller.has_pending_authoritative_profile_refresh() is False
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert fake_db.app_state[controller.ACCESS_TOKEN_KEY]
+        assert fake_db.app_state[controller.REFRESH_TOKEN_KEY]
+        assert json.loads(fake_db.app_state[controller.USER_PROFILE_KEY])["nickname"] == "Cached Alice"
         assert fake_message_manager.user_ids == []
         assert fake_chat_controller.user_ids == []
-        assert fake_e2ee_service.calls == 1
-
-        async def fetch_authoritative_user():
-            return {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
-
-        fake_auth_service.fetch_current_user = fetch_authoritative_user
-        refreshed = await controller.refresh_current_user_profile_if_needed()
-
-        assert refreshed == {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
-        assert controller.current_user == {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
-        assert controller.has_pending_authoritative_profile_refresh() is False
-        assert json.loads(fake_db.app_state[controller.USER_PROFILE_KEY])["nickname"] == "Alice Updated"
+        assert fake_e2ee_service.calls == 0
 
     asyncio.run(scenario())
 
