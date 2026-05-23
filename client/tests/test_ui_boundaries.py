@@ -599,19 +599,28 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
     assert 'class FriendMomentsDialog(FluentDialog):' in contact_interface
-    assert 'class FriendMomentsBackButton(TitleBarButton):' in contact_interface
-    assert 'super().__init__(parent=parent, title=title)' in contact_interface
+    assert 'class FriendMomentsTitleIconButton(TitleBarButton):' in contact_interface
+    assert 'class FriendMomentsBackButton(FriendMomentsTitleIconButton):' in contact_interface
+    assert 'super().__init__(parent=parent, title="")' in contact_interface
+    assert 'self.setWindowTitle("")' in contact_interface
+    assert 'self.title_label.hide()' in contact_interface
+    assert 'self.setWindowTitle(tr("common.moments", "Moments"))' not in contact_interface
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
     assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
     assert 'self.minimize_button = MinimizeButton(self.title_bar)' in contact_interface
     assert 'self.back_button = FriendMomentsBackButton(self.title_bar, corner_radius=self._radius)' in contact_interface
     assert 'self.page_stack = QStackedWidget(self.content_widget)' in contact_interface
-    assert 'self.friend_moments_page = self._create_friend_moments_page(title)' in contact_interface
+    assert 'self.friend_moments_page = self._create_friend_moments_page()' in contact_interface
     assert 'self.my_moments_page = self._create_my_moments_page()' in contact_interface
-    assert 'self.notify_button = TransparentToolButton(CollectionIcon("alert"), self.title_bar)' in contact_interface
-    assert 'self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' in contact_interface
-    assert 'self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, self.title_bar)' in contact_interface
+    assert 'self.notify_button = FriendMomentsTitleIconButton(CollectionIcon("alert"), self.title_bar)' in contact_interface
+    assert 'self.publish_moment_button = FriendMomentsTitleIconButton(AppIcon.ADD, self.title_bar)' in contact_interface
+    assert 'self.refresh_moments_button = FriendMomentsTitleIconButton(AppIcon.SYNC, self.title_bar)' in contact_interface
+    friend_dialog_block = contact_interface.split('class FriendMomentsDialog(FluentDialog):', 1)[1].split('class UserSearchItem', 1)[0]
+    assert 'TitleLabel(' not in friend_dialog_block
+    assert 'PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' not in contact_interface
+    assert 'TransparentToolButton(CollectionIcon("alert"), self.title_bar)' not in contact_interface
+    assert 'TransparentToolButton(AppIcon.SYNC, self.title_bar)' not in contact_interface
     assert 'def _sync_title_bar_actions(self) -> None:' in contact_interface
     assert 'is_my_moments = self.page_stack is not None and self.page_stack.currentWidget() is self.my_moments_page' in contact_interface
     assert 'self.back_button.setVisible(not is_my_moments)' in contact_interface

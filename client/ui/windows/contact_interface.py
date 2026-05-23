@@ -992,25 +992,17 @@ class GalleryContactDetailPanel(QWidget):
             button.setEnabled(available)
 
 
-class FriendMomentsBackButton(TitleBarButton):
-    """Title-bar back button with a rounded top-left hover surface."""
+class FriendMomentsTitleIconButton(TitleBarButton):
+    """Title-bar icon button painted with the same state model as native title buttons."""
 
-    def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
+    def __init__(self, icon, parent=None) -> None:
         super().__init__(parent)
-        self._corner_radius = max(0, int(corner_radius or 0))
+        self._icon = icon
         self.setIconSize(QSize(16, 16))
 
     def _background_path(self) -> QPainterPath:
-        rect = QRectF(self.rect())
-        radius = min(float(self._corner_radius), rect.width(), rect.height())
         path = QPainterPath()
-        path.moveTo(rect.left() + radius, rect.top())
-        path.lineTo(rect.right(), rect.top())
-        path.lineTo(rect.right(), rect.bottom())
-        path.lineTo(rect.left(), rect.bottom())
-        path.lineTo(rect.left(), rect.top() + radius)
-        path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
-        path.closeSubpath()
+        path.addRect(QRectF(self.rect()))
         return path
 
     def paintEvent(self, event) -> None:
@@ -1029,7 +1021,28 @@ class FriendMomentsBackButton(TitleBarButton):
             icon_size.width(),
             icon_size.height(),
         )
-        drawIcon(FluentIcon.RETURN, painter, icon_rect, fill=color.name())
+        drawIcon(self._icon, painter, icon_rect, fill=color.name())
+
+
+class FriendMomentsBackButton(FriendMomentsTitleIconButton):
+    """Title-bar back button with a rounded top-left hover surface."""
+
+    def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
+        super().__init__(FluentIcon.RETURN, parent)
+        self._corner_radius = max(0, int(corner_radius or 0))
+
+    def _background_path(self) -> QPainterPath:
+        rect = QRectF(self.rect())
+        radius = min(float(self._corner_radius), rect.width(), rect.height())
+        path = QPainterPath()
+        path.moveTo(rect.left() + radius, rect.top())
+        path.lineTo(rect.right(), rect.top())
+        path.lineTo(rect.right(), rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        path.lineTo(rect.left(), rect.top() + radius)
+        path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
+        path.closeSubpath()
+        return path
 
 
 class FriendMomentsDialog(FluentDialog):
@@ -1053,18 +1066,13 @@ class FriendMomentsDialog(FluentDialog):
         self.my_moments_page: QWidget | None = None
         self.back_button: FriendMomentsBackButton | None = None
         self.minimize_button: MinimizeButton | None = None
-        self.notify_button: TransparentToolButton | None = None
-        self.publish_moment_button: PrimaryPushButton | None = None
-        self.refresh_moments_button: TransparentToolButton | None = None
-        display_name = str(contact.display_name or contact.username or contact.id or "").strip()
-        title = tr(
-            "contact.friend_moments.title",
-            "{name}'s Moments",
-            name=display_name or tr("contact.detail.label.moments", "Moments"),
-        )
-        super().__init__(parent=parent, title=title)
+        self.notify_button: FriendMomentsTitleIconButton | None = None
+        self.publish_moment_button: FriendMomentsTitleIconButton | None = None
+        self.refresh_moments_button: FriendMomentsTitleIconButton | None = None
+        super().__init__(parent=parent, title="")
         self.setObjectName("FriendMomentsDialog")
-        self.setWindowTitle(title)
+        self.setWindowTitle("")
+        self.title_label.hide()
         self.resize(self.DIALOG_WIDTH, 720)
         self.setFixedWidth(self.DIALOG_WIDTH)
         self.setMinimumHeight(self.MIN_DIALOG_HEIGHT)
@@ -1083,12 +1091,13 @@ class FriendMomentsDialog(FluentDialog):
         self.minimize_button.setToolTip(tr("common.minimize", "Minimize"))
         self.minimize_button.clicked.connect(self.showMinimized)
 
-        self.notify_button = TransparentToolButton(CollectionIcon("alert"), self.title_bar)
+        self.notify_button = FriendMomentsTitleIconButton(CollectionIcon("alert"), self.title_bar)
         self.notify_button.setObjectName("friendMomentsNotifyButton")
         self.notify_button.setToolTip(tr("discovery.notifications.button", "Notifications"))
-        self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)
+        self.publish_moment_button = FriendMomentsTitleIconButton(AppIcon.ADD, self.title_bar)
         self.publish_moment_button.setObjectName("friendMomentsPublishButton")
-        self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, self.title_bar)
+        self.publish_moment_button.setToolTip(tr("discovery.feed.publish_button", "Publish Moment"))
+        self.refresh_moments_button = FriendMomentsTitleIconButton(AppIcon.SYNC, self.title_bar)
         self.refresh_moments_button.setObjectName("friendMomentsRefreshButton")
         self.refresh_moments_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
 
@@ -1110,7 +1119,7 @@ class FriendMomentsDialog(FluentDialog):
         self.page_stack.setObjectName("friendMomentsPageStack")
         self.page_stack.setMouseTracking(True)
         self.page_stack.installEventFilter(self)
-        self.friend_moments_page = self._create_friend_moments_page(title)
+        self.friend_moments_page = self._create_friend_moments_page()
         self.my_moments_page = self._create_my_moments_page()
         self.page_stack.addWidget(self.friend_moments_page)
         self.page_stack.addWidget(self.my_moments_page)
@@ -1166,7 +1175,7 @@ class FriendMomentsDialog(FluentDialog):
             self.unsetCursor()
         super().leaveEvent(event)
 
-    def _create_friend_moments_page(self, title: str) -> QWidget:
+    def _create_friend_moments_page(self) -> QWidget:
         page = QWidget(self.page_stack)
         page.setObjectName("friendMomentsFriendPage")
         page.setMouseTracking(True)
@@ -1175,14 +1184,12 @@ class FriendMomentsDialog(FluentDialog):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
-        title_label = TitleLabel(title, page)
         placeholder = BodyLabel(
             tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."),
             page,
         )
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(title_label)
         layout.addStretch(1)
         layout.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
@@ -1197,11 +1204,9 @@ class FriendMomentsDialog(FluentDialog):
         layout.setContentsMargins(20, 18, 20, 24)
         layout.setSpacing(16)
 
-        title_label = TitleLabel(tr("common.moments", "Moments"), page)
         placeholder = BodyLabel(tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."), page)
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(title_label)
         layout.addStretch(1)
         layout.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
@@ -1218,7 +1223,7 @@ class FriendMomentsDialog(FluentDialog):
         stack_size = self.page_stack.size()
         if stack_size.width() <= 0 or stack_size.height() <= 0:
             self.page_stack.setCurrentWidget(target)
-            self.setWindowTitle(tr("common.moments", "Moments"))
+            self.setWindowTitle("")
             self._sync_title_bar_actions()
             return
 
@@ -1257,7 +1262,7 @@ class FriendMomentsDialog(FluentDialog):
             self.page_stack.setCurrentWidget(target)
             current.move(0, 0)
             target.move(0, 0)
-            self.setWindowTitle(tr("common.moments", "Moments"))
+            self.setWindowTitle("")
             self._sync_title_bar_actions()
             self._page_transition_active = False
             if self._page_transition_group is group:
