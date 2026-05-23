@@ -109,6 +109,29 @@ def test_contact_sidebar_items_use_arrow_cursor() -> None:
     assert 'self.setCursor(Qt.CursorShape.PointingHandCursor)' not in request_item_block
 
 
+def test_contact_interface_uses_fluent_splitter_handle_feedback() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    light_contact_qss = Path('client/ui/styles/qss/light/contact_interface.qss').read_text(encoding='utf-8')
+    dark_contact_qss = Path('client/ui/styles/qss/dark/contact_interface.qss').read_text(encoding='utf-8')
+
+    assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in contact_interface
+    assert 'splitter = FluentSplitter(Qt.Orientation.Horizontal, self)' in contact_interface
+    assert 'splitter = QSplitter(Qt.Orientation.Horizontal, self)' not in contact_interface
+    assert 'splitter.setObjectName("contactSplitter")' in contact_interface
+    assert 'splitter.setHandleWidth(1)' in contact_interface
+
+    for qss in (light_contact_qss, dark_contact_qss):
+        assert 'QSplitter#contactSplitter {' in qss
+        assert 'QSplitter#contactSplitter::handle:horizontal {' in qss
+        contact_handle_block = qss.split('QSplitter#contactSplitter::handle:horizontal {', 1)[1].split('}', 1)[0]
+        assert 'background: transparent;' in contact_handle_block
+        assert 'border: none;' in contact_handle_block
+        assert 'margin: 0;' in contact_handle_block
+        assert 'QSplitter#contactSplitter::handle:horizontal:hover' not in qss
+        assert 'QSplitter#contactSplitter::handle:horizontal:pressed' not in qss
+        assert '{{HANDLE_HOVER}}' not in qss
+
+
 def test_page_welcome_states_use_shared_placeholder() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

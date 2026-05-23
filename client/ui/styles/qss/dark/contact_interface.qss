@@ -147,12 +147,15 @@ QAbstractScrollArea {
     border: none;
 }
 
-QSplitter#contactSplitter::handle:horizontal {
-    background: {{HANDLE_COLOR}};
+QSplitter#contactSplitter {
+    background: transparent;
+    border: none;
 }
 
-QSplitter#contactSplitter::handle:horizontal:hover {
-    background: {{HANDLE_HOVER}};
+QSplitter#contactSplitter::handle:horizontal {
+    background: transparent;
+    border: none;
+    margin: 0;
 }
 
 QWidget#globalSearchPanel,

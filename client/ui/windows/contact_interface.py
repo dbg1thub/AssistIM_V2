@@ -23,7 +23,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -77,6 +77,7 @@ from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog, FluentDialogTitleButton
+from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.contact_shared import (
     CONTACT_SIDEBAR_AVATAR_SIZE,
     CONTACT_SIDEBAR_CONTENT_GAP,
@@ -1829,7 +1830,7 @@ class ContactInterface(QWidget):
         QTimer.singleShot(0, self.reload_data)
 
     def _setup_ui(self) -> None:
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter = FluentSplitter(Qt.Orientation.Horizontal, self)
         splitter.setObjectName("contactSplitter")
         splitter.setHandleWidth(1)
         splitter.setChildrenCollapsible(False)
