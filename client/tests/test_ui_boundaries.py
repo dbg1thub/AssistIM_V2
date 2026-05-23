@@ -609,9 +609,13 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self.page_stack = QStackedWidget(self.content_widget)' in contact_interface
     assert 'self.friend_moments_page = self._create_friend_moments_page(title)' in contact_interface
     assert 'self.my_moments_page = self._create_my_moments_page()' in contact_interface
-    assert 'self.notify_button = TransparentToolButton(CollectionIcon("alert"), toolbar)' in contact_interface
-    assert 'self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), toolbar)' in contact_interface
-    assert 'self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, toolbar)' in contact_interface
+    assert 'self.notify_button = TransparentToolButton(CollectionIcon("alert"), self.title_bar)' in contact_interface
+    assert 'self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' in contact_interface
+    assert 'self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, self.title_bar)' in contact_interface
+    assert 'def _sync_title_bar_actions(self) -> None:' in contact_interface
+    assert 'is_my_moments = self.page_stack is not None and self.page_stack.currentWidget() is self.my_moments_page' in contact_interface
+    assert 'self.back_button.setVisible(not is_my_moments)' in contact_interface
+    assert 'button.setVisible(is_my_moments)' in contact_interface
     assert 'def _switch_to_my_moments(self) -> None:' in contact_interface
     assert 'self._animate_page_transition(current, target, direction="right")' in contact_interface
     assert 'QPropertyAnimation(current, b"pos", self)' in contact_interface
@@ -619,6 +623,7 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self._bottom_resize_hit_test(event.position().toPoint())' in contact_interface
     assert 'self.resize(self.width(), max(self.minimumHeight(), self._resize_start_height + delta_y))' in contact_interface
     assert 'self.setGeometry(self.x(), new_y, self.width(), new_height)' in contact_interface
+    assert 'toolbar = QWidget(page)' not in contact_interface
     assert 'TransparentToolButton(CollectionIcon("subtract"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(CollectionIcon("arrow_left"), self.title_bar)' not in contact_interface
     assert 'event.accept()' in contact_interface.split('class FriendMomentPreviewStrip(QWidget):', 1)[1].split('def _load_tile', 1)[0]

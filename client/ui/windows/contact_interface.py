@@ -1053,6 +1053,9 @@ class FriendMomentsDialog(FluentDialog):
         self.my_moments_page: QWidget | None = None
         self.back_button: FriendMomentsBackButton | None = None
         self.minimize_button: MinimizeButton | None = None
+        self.notify_button: TransparentToolButton | None = None
+        self.publish_moment_button: PrimaryPushButton | None = None
+        self.refresh_moments_button: TransparentToolButton | None = None
         display_name = str(contact.display_name or contact.username or contact.id or "").strip()
         title = tr(
             "contact.friend_moments.title",
@@ -1079,11 +1082,24 @@ class FriendMomentsDialog(FluentDialog):
         self.minimize_button.setObjectName("friendMomentsMinimizeButton")
         self.minimize_button.setToolTip(tr("common.minimize", "Minimize"))
         self.minimize_button.clicked.connect(self.showMinimized)
+
+        self.notify_button = TransparentToolButton(CollectionIcon("alert"), self.title_bar)
+        self.notify_button.setObjectName("friendMomentsNotifyButton")
+        self.notify_button.setToolTip(tr("discovery.notifications.button", "Notifications"))
+        self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)
+        self.publish_moment_button.setObjectName("friendMomentsPublishButton")
+        self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, self.title_bar)
+        self.refresh_moments_button.setObjectName("friendMomentsRefreshButton")
+        self.refresh_moments_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
+
         self._apply_friend_title_button_colors()
 
         title_layout = self.title_bar.layout()
         if isinstance(title_layout, QHBoxLayout):
             title_layout.insertWidget(0, self.back_button, 0, Qt.AlignmentFlag.AlignTop)
+            title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignVCenter)
             title_layout.insertWidget(title_layout.count() - 1, self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)
 
         root = self.content_layout
@@ -1100,6 +1116,7 @@ class FriendMomentsDialog(FluentDialog):
         self.page_stack.addWidget(self.my_moments_page)
         self.page_stack.setCurrentWidget(self.friend_moments_page)
         root.addWidget(self.page_stack)
+        self._sync_title_bar_actions()
 
     def eventFilter(self, watched, event) -> bool:
         resize_watchers = {
@@ -1180,31 +1197,10 @@ class FriendMomentsDialog(FluentDialog):
         layout.setContentsMargins(20, 18, 20, 24)
         layout.setSpacing(16)
 
-        toolbar = QWidget(page)
-        toolbar.setObjectName("friendMomentsToolbar")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(10)
-
-        self.notify_button = TransparentToolButton(CollectionIcon("alert"), toolbar)
-        self.notify_button.setObjectName("friendMomentsNotifyButton")
-        self.notify_button.setToolTip(tr("discovery.notifications.button", "Notifications"))
-        self.publish_moment_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), toolbar)
-        self.publish_moment_button.setObjectName("friendMomentsPublishButton")
-        self.refresh_moments_button = TransparentToolButton(AppIcon.SYNC, toolbar)
-        self.refresh_moments_button.setObjectName("friendMomentsRefreshButton")
-        self.refresh_moments_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
-
-        toolbar_layout.addWidget(self.notify_button, 0)
-        toolbar_layout.addWidget(self.publish_moment_button, 0)
-        toolbar_layout.addWidget(self.refresh_moments_button, 0)
-        toolbar_layout.addStretch(1)
-
         title_label = TitleLabel(tr("common.moments", "Moments"), page)
         placeholder = BodyLabel(tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."), page)
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(toolbar)
         layout.addWidget(title_label)
         layout.addStretch(1)
         layout.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
@@ -1223,6 +1219,7 @@ class FriendMomentsDialog(FluentDialog):
         if stack_size.width() <= 0 or stack_size.height() <= 0:
             self.page_stack.setCurrentWidget(target)
             self.setWindowTitle(tr("common.moments", "Moments"))
+            self._sync_title_bar_actions()
             return
 
         if self._page_transition_group is not None:
@@ -1261,6 +1258,7 @@ class FriendMomentsDialog(FluentDialog):
             current.move(0, 0)
             target.move(0, 0)
             self.setWindowTitle(tr("common.moments", "Moments"))
+            self._sync_title_bar_actions()
             self._page_transition_active = False
             if self._page_transition_group is group:
                 self._page_transition_group = None
@@ -1269,6 +1267,14 @@ class FriendMomentsDialog(FluentDialog):
         group.finished.connect(finish_transition)
         self._page_transition_group = group
         group.start()
+
+    def _sync_title_bar_actions(self) -> None:
+        is_my_moments = self.page_stack is not None and self.page_stack.currentWidget() is self.my_moments_page
+        if self.back_button is not None:
+            self.back_button.setVisible(not is_my_moments)
+        for button in (self.notify_button, self.publish_moment_button, self.refresh_moments_button):
+            if button is not None:
+                button.setVisible(is_my_moments)
 
     def _handle_vertical_resize_event(self, watched: QWidget, event) -> bool:
         if not hasattr(event, "position"):
