@@ -1796,7 +1796,7 @@ class AIAssistantInterface(QWidget):
             if isDarkTheme():
                 panel = "rgba(32, 35, 39, 0.72)"
                 border = "rgba(255,255,255,0.08)"
-                input_bg = "rgba(31, 31, 31, 0.96)"
+                input_bg = "rgba(31, 31, 31, 245)"
                 text = "rgb(241,245,249)"
                 muted_text = "rgba(241,245,249,0.72)"
                 hover_bg = "rgba(255,255,255,0.08)"
@@ -1807,7 +1807,7 @@ class AIAssistantInterface(QWidget):
             else:
                 panel = "rgba(255, 255, 255, 0.72)"
                 border = "rgba(15,23,42,0.08)"
-                input_bg = "rgba(255, 255, 255, 0.96)"
+                input_bg = "rgba(255, 255, 255, 245)"
                 text = "rgb(17,24,39)"
                 muted_text = "rgba(17,24,39,0.64)"
                 hover_bg = "rgba(0,0,0,0.05)"

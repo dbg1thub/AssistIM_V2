@@ -4,7 +4,7 @@ QWidget#messageInput {
 }
 
 QWidget#messageInputCard {
-    background: rgba(31, 31, 31, 0.96);
+    background: rgba(31, 31, 31, 245);
     border: none;
     border-radius: 8px;
 }
