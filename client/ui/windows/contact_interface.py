@@ -973,6 +973,41 @@ class GalleryContactDetailPanel(QWidget):
             button.setVisible(available)
             button.setEnabled(available)
 
+
+class FriendMomentsDialog(FluentDialog):
+    """Placeholder dialog for one friend's moments timeline."""
+
+    def __init__(self, contact: ContactRecord, parent=None):
+        self._contact = contact
+        display_name = str(contact.display_name or contact.username or contact.id or "").strip()
+        title = tr(
+            "contact.friend_moments.title",
+            "{name}'s Moments",
+            name=display_name or tr("contact.detail.label.moments", "Moments"),
+        )
+        super().__init__(parent=parent, title=title)
+        self.setObjectName("FriendMomentsDialog")
+        self.setWindowTitle(title)
+        self.resize(620, 720)
+        self.setMinimumSize(520, 560)
+
+        root = self.content_layout
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(14)
+
+        title_label = TitleLabel(title, self.content_widget)
+        placeholder = BodyLabel(
+            tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here."),
+            self.content_widget,
+        )
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        root.addWidget(title_label)
+        root.addStretch(1)
+        root.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignCenter)
+        root.addStretch(1)
+
+
 class UserSearchItem(CardWidget):
     add_clicked = Signal(str)
 
@@ -2637,12 +2672,8 @@ class ContactInterface(QWidget):
         contact = payload.get("data")
         if not isinstance(contact, ContactRecord):
             return
-        InfoBar.info(
-            tr("contact.detail.moments", "Moments"),
-            tr("contact.detail.moments_coming_soon", "Friend timeline view will open here later."),
-            parent=self.window(),
-            duration=1600,
-        )
+        dialog = FriendMomentsDialog(contact, self.window())
+        self._show_dialog(dialog)
 
     def _show_friend_detail_more_menu(self, payload: object, global_pos: QPoint) -> None:
         """Show the detail-card friend management menu."""

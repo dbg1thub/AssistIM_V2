@@ -595,6 +595,19 @@ def test_contact_interface_no_longer_embeds_moments_panel() -> None:
     assert 'MomentEvent' not in contact_interface
 
 
+def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'class FriendMomentsDialog(FluentDialog):' in contact_interface
+    assert 'super().__init__(parent=parent, title=title)' in contact_interface
+    assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
+    assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
+    assert 'dialog = FriendMomentsDialog(contact, self.window())' in contact_interface
+    assert 'dialog.show()' in contact_interface
+    assert 'contact.detail.moments_coming_soon' not in contact_interface
+    assert 'Friend timeline view will open here later.' not in contact_interface
+
+
 def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
