@@ -709,7 +709,7 @@ class ContactActionButton(QWidget):
         super().paintEvent(event)
 
 
-class GalleryContactDetailPanel(QWidget):
+class ContactDetailCard(CardWidget):
     message_requested = Signal(object)
     call_requested = Signal(object, str)
     remark_edit_requested = Signal(object)
@@ -719,21 +719,13 @@ class GalleryContactDetailPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entity: Optional[dict[str, object]] = None
-        self.setObjectName("ContactDetailPanel")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(24, 24, 24, 24)
-        root_layout.setSpacing(0)
-        root_layout.addStretch(1)
-
-        self.header = CardWidget(self)
-        self.header.setObjectName("ContactDetailHeader")
-        self.header.setBorderRadius(8)
-        self.header.setMinimumWidth(420)
-        self.header.setMaximumWidth(460)
-        self.header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        header_layout = QVBoxLayout(self.header)
+        self.header = self
+        self.setObjectName("ContactDetailHeader")
+        self.setBorderRadius(8)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(460)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        header_layout = QVBoxLayout(self)
         header_layout.setContentsMargins(28, 26, 28, 26)
         header_layout.setSpacing(0)
 
@@ -811,8 +803,6 @@ class GalleryContactDetailPanel(QWidget):
         self.moments_row.layout().setAlignment(self.moment_strip, Qt.AlignmentFlag.AlignVCenter)
         self._set_call_buttons_available(False)
 
-        root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignHCenter)
-        root_layout.addStretch(1)
         self.show_placeholder()
 
     @staticmethod
@@ -836,6 +826,16 @@ class GalleryContactDetailPanel(QWidget):
         self.moment_strip.clear()
         self.message_button.setEnabled(False)
         self._set_call_buttons_available(False)
+
+    def entity_key(self) -> tuple[str, str] | None:
+        entity = dict(self._entity or {})
+        data = entity.get("data")
+        entity_type = str(entity.get("type", "") or "")
+        if hasattr(data, "id"):
+            return entity_type, str(getattr(data, "id", "") or "")
+        if isinstance(data, dict):
+            return entity_type, str(data.get("id", "") or "")
+        return None
 
     def set_contact(self, contact: ContactRecord) -> None:
         self._entity = {"type": "friend", "data": contact}
@@ -985,6 +985,74 @@ class GalleryContactDetailPanel(QWidget):
         for button in (self.voice_button, self.video_button):
             button.setVisible(available)
             button.setEnabled(available)
+
+
+class ContactDetailPanel(QWidget):
+    message_requested = Signal(object)
+    call_requested = Signal(object, str)
+    remark_edit_requested = Signal(object)
+    friend_moments_requested = Signal(object)
+    detail_more_requested = Signal(object, QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContactDetailPanel")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(24, 24, 24, 24)
+        root_layout.setSpacing(0)
+        root_layout.addStretch(1)
+
+        self.card_stack = AnimatedStackWidget(self)
+        self.card_stack.setObjectName("contactDetailCardStack")
+        self.card_stack.setMinimumWidth(420)
+        self.card_stack.setMaximumWidth(460)
+        self.card_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self._cards = [ContactDetailCard(self.card_stack), ContactDetailCard(self.card_stack)]
+        self._active_card = self._cards[0]
+        for card in self._cards:
+            self.card_stack.addWidget(card)
+            card.message_requested.connect(self.message_requested.emit)
+            card.call_requested.connect(self.call_requested.emit)
+            card.remark_edit_requested.connect(self.remark_edit_requested.emit)
+            card.friend_moments_requested.connect(self.friend_moments_requested.emit)
+            card.detail_more_requested.connect(self.detail_more_requested.emit)
+        self.card_stack.setCurrentWidget(self._active_card)
+
+        root_layout.addWidget(self.card_stack, 0, Qt.AlignmentFlag.AlignHCenter)
+        root_layout.addStretch(1)
+        self.show_placeholder()
+
+    def _inactive_card(self) -> ContactDetailCard:
+        return self._cards[1] if self._active_card is self._cards[0] else self._cards[0]
+
+    def _switch_to_card(self, target_card: ContactDetailCard) -> None:
+        self._active_card = target_card
+        self.card_stack.slide_to_widget(target_card, direction="right")
+
+    def show_placeholder(self) -> None:
+        self._active_card.show_placeholder()
+
+    def set_contact(self, contact: ContactRecord) -> None:
+        if self._active_card.entity_key() == ("friend", contact.id):
+            self._active_card.set_contact(contact)
+            return
+        target_card = self._inactive_card() if self.isVisible() else self._active_card
+        target_card.set_contact(contact)
+        self._switch_to_card(target_card)
+
+    def set_friend_moment_images(self, media: list[MomentMediaRecord]) -> None:
+        self._active_card.set_friend_moment_images(media)
+
+    def set_blocked_contact(self, contact: ContactRecord) -> None:
+        self._active_card.set_blocked_contact(contact)
+
+    def set_group(self, group: GroupRecord) -> None:
+        self._active_card.set_group(group)
+
+    def set_request(self, request: FriendRequestRecord, current_user_id: str = "") -> None:
+        self._active_card.set_request(request, current_user_id)
 
 
 class FriendMomentsDialog(FluentDialog):
@@ -1834,7 +1902,7 @@ class ContactInterface(QWidget):
         self.detail_stack = AnimatedStackWidget(self)
         self.detail_stack.setObjectName("contactDetailStack")
         self.welcome_panel = ContactWelcomeWidget(self.detail_stack)
-        self.detail_panel = GalleryContactDetailPanel(self.detail_stack)
+        self.detail_panel = ContactDetailPanel(self.detail_stack)
         self.detail_stack.addWidget(self.welcome_panel)
         self.detail_stack.addWidget(self.detail_panel)
 
