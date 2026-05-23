@@ -433,8 +433,38 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
         'class MomentsCoverBanner(QFrame):',
         1,
     )[0]
+    profile_block = discovery_interface.split('class MomentsProfileBlock(QWidget):', 1)[1].split(
+        'class MomentsLeftPanel(QWidget):',
+        1,
+    )[0]
+    nav_item_block = discovery_interface.split('class MomentsNavItem(QFrame):', 1)[1].split(
+        'class MomentsProfileBlock(QWidget):',
+        1,
+    )[0]
+    left_panel_block = discovery_interface.split('class MomentsLeftPanel(QWidget):', 1)[1].split(
+        'class MomentsFeedToolbar(QWidget):',
+        1,
+    )[0]
+    feed_toolbar_block = discovery_interface.split('class MomentsFeedToolbar(QWidget):', 1)[1].split(
+        'class MomentsComposePrompt(BodyLabel):',
+        1,
+    )[0]
+    compose_bar_block = discovery_interface.split('class MomentsComposeBar(QWidget):', 1)[1].split(
+        'class MomentsFeedList(QWidget):',
+        1,
+    )[0]
+    feed_panel_block = discovery_interface.split('class MomentsFeedPanel(QWidget):', 1)[1].split(
+        'class MomentsRightPanel(QWidget):',
+        1,
+    )[0]
+    right_panel_block = discovery_interface.split('class MomentsRightPanel(QWidget):', 1)[1].split(
+        'class DiscoveryInterface(QWidget):',
+        1,
+    )[0]
 
     assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in discovery_interface
+    assert 'MOMENTS_PANEL_CONTENT_MARGIN = 12' in discovery_interface
+    assert 'MOMENTS_PANEL_CONTENT_SPACING = 12' in discovery_interface
     assert 'class MomentsLeftPanel(QWidget):' in discovery_interface
     assert 'class MomentsFeedPanel(QWidget):' in discovery_interface
     assert 'class MomentsRightPanel(QWidget):' in discovery_interface
@@ -471,6 +501,77 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE' in discovery_interface
     assert 'nav_layout.setContentsMargins(0, 0, 0, 0)' in discovery_interface
     assert 'nav_layout.setSpacing(0)' in discovery_interface
+    assert 'layout.setContentsMargins(0, 0, 0, 0)' in left_panel_block
+    assert 'layout.setSpacing(0)' in left_panel_block
+    assert 'layout.setContentsMargins(0, 0, 0, 0)' in feed_panel_block
+    assert 'layout.setSpacing(0)' in feed_panel_block
+    assert 'layout.setContentsMargins(0, 0, 0, 0)' in right_panel_block
+    assert 'layout.setSpacing(0)' in right_panel_block
+    assert (
+        'root_layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in profile_block
+    assert 'root_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in profile_block
+    assert 'identity_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in profile_block
+    assert 'stats_row.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in profile_block
+    assert (
+        'layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in nav_item_block
+    assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in nav_item_block
+    assert 'nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in left_panel_block
+    assert 'layout.setContentsMargins(20, 12, 20, 12)' not in feed_toolbar_block
+    assert 'layout.setContentsMargins(20, 12, 20, 12)' not in compose_bar_block
+    assert 'layout.setSpacing(6)' not in feed_toolbar_block
+    assert 'layout.setSpacing(10)' not in feed_toolbar_block
+    assert 'layout.setSpacing(10)' not in compose_bar_block
+    assert (
+        'layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in feed_toolbar_block
+    assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in feed_toolbar_block
+    assert 'top_row.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in feed_toolbar_block
+    assert (
+        'layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in compose_bar_block
+    assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in compose_bar_block
+    assert 'content_layout.setContentsMargins(0, 0, 0, 0)' in right_panel_block
+    assert 'content_layout.setSpacing(0)' in right_panel_block
+    assert (
+        'card_layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in right_panel_block
+    assert 'card_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in right_panel_block
+    assert (
+        'layout.setContentsMargins(\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
+        '        )'
+    ) in right_panel_block
+    assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in right_panel_block
     assert 'self.feed_filter = SegmentedWidget(self)' in discovery_interface
     assert 'self.feed_filter.addItem(routeKey="all"' in discovery_interface
     assert 'self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"))' in discovery_interface

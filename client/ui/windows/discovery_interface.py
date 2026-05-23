@@ -1887,6 +1887,10 @@ class MomentCard(QWidget):
         QDesktopServices.openUrl(QUrl(video_source))
 
 
+MOMENTS_PANEL_CONTENT_MARGIN = 12
+MOMENTS_PANEL_CONTENT_SPACING = 12
+
+
 class MomentsCoverBanner(QFrame):
     """Profile cover placeholder that later accepts a user-uploaded moments banner."""
 
@@ -1909,8 +1913,13 @@ class MomentsNavItem(QFrame):
         self.setMinimumHeight(32)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.icon_widget = IconWidget(icon, self)
         self.icon_widget.setFixedSize(16, 16)
@@ -1947,8 +1956,13 @@ class MomentsProfileBlock(QWidget):
         self.setObjectName("MomentsProfileBlock")
 
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(16, 16, 16, 12)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        root_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.header_area = QWidget(self)
         self.header_area.setObjectName("MomentsProfileHeaderArea")
@@ -1959,7 +1973,7 @@ class MomentsProfileBlock(QWidget):
         self.identity_row.setObjectName("MomentsProfileIdentityRow")
         identity_layout = QHBoxLayout(self.identity_row)
         identity_layout.setContentsMargins(0, 0, 0, 0)
-        identity_layout.setSpacing(10)
+        identity_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.avatar = DiscoveryAvatar(40, self.identity_row)
         self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
@@ -1984,7 +1998,7 @@ class MomentsProfileBlock(QWidget):
 
         stats_row = QHBoxLayout()
         stats_row.setContentsMargins(0, 0, 0, 0)
-        stats_row.setSpacing(0)
+        stats_row.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.posts", "Moments")))
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.friends", "Friends")))
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.likes", "Likes")))
@@ -2041,7 +2055,7 @@ class MomentsLeftPanel(QWidget):
         self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
         self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))
         self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"), badge_text="0")
-        nav_layout.addSpacing(8)
+        nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         self._add_nav_item(nav_layout, "saved", AppIcon.FOLDER, tr("discovery.nav.saved", "Saved"))
         self._add_nav_item(nav_layout, "albums", AppIcon.PHOTO, tr("discovery.nav.albums", "Albums"))
         self._add_nav_item(nav_layout, "footprints", AppIcon.GLOBE, tr("discovery.nav.footprints", "Footprints"))
@@ -2093,12 +2107,17 @@ class MomentsFeedToolbar(QWidget):
         self.setObjectName("MomentsFeedToolbar")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(10)
+        top_row.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         self.title_label = BodyLabel(tr("discovery.feed.title", "Moments"), self)
         self.title_label.setObjectName("MomentsFeedTitle")
         top_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2157,8 +2176,13 @@ class MomentsComposeBar(QWidget):
         self.setObjectName("MomentsComposeBar")
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
 
         self.avatar = DiscoveryAvatar(32, self)
         self.avatar.set_avatar("", tr("discovery.profile.avatar_fallback", "Me"))
@@ -2310,8 +2334,13 @@ class MomentsRightPanel(QWidget):
         card = QFrame(section)
         card.setObjectName("MomentsDigestCard")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(10, 10, 10, 10)
-        card_layout.setSpacing(6)
+        card_layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        card_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         label = CaptionLabel(tr("discovery.sidebar.digest_label", "Feed overview"), card)
         label.setObjectName("MomentsDigestLabel")
         text = BodyLabel(
@@ -2340,8 +2369,13 @@ class MomentsRightPanel(QWidget):
         section = QFrame(self.content if hasattr(self, "content") else self)
         section.setObjectName("MomentsRightSection")
         layout = QVBoxLayout(section)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+            MOMENTS_PANEL_CONTENT_MARGIN,
+        )
+        layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         title_label = CaptionLabel(title, section)
         title_label.setObjectName("MomentsRightSectionTitle")
         layout.addWidget(title_label)
