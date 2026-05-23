@@ -617,7 +617,12 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self.notify_button = FriendMomentsTitleIconButton(CollectionIcon("alert"), self.title_bar)' in contact_interface
     assert 'self.publish_moment_button = FriendMomentsTitleIconButton(AppIcon.ADD, self.title_bar)' in contact_interface
     assert 'self.refresh_moments_button = FriendMomentsTitleIconButton(AppIcon.SYNC, self.title_bar)' in contact_interface
+    assert 'title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
+    assert 'title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
+    assert 'title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
+    assert 'buttons = [self.back_button, self.notify_button, self.publish_moment_button, self.refresh_moments_button, self.minimize_button]' in contact_interface
     friend_dialog_block = contact_interface.split('class FriendMomentsDialog(FluentDialog):', 1)[1].split('class UserSearchItem', 1)[0]
+    assert 'Qt.AlignmentFlag.AlignVCenter' not in friend_dialog_block
     assert 'TitleLabel(' not in friend_dialog_block
     assert 'PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(CollectionIcon("alert"), self.title_bar)' not in contact_interface

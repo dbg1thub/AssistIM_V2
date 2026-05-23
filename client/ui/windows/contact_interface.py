@@ -1106,9 +1106,9 @@ class FriendMomentsDialog(FluentDialog):
         title_layout = self.title_bar.layout()
         if isinstance(title_layout, QHBoxLayout):
             title_layout.insertWidget(0, self.back_button, 0, Qt.AlignmentFlag.AlignTop)
-            title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignVCenter)
-            title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignVCenter)
-            title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignTop)
+            title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignTop)
+            title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignTop)
             title_layout.insertWidget(title_layout.count() - 1, self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)
 
         root = self.content_layout
@@ -1343,7 +1343,7 @@ class FriendMomentsDialog(FluentDialog):
         self._apply_friend_title_button_colors()
 
     def _apply_friend_title_button_colors(self) -> None:
-        buttons = [self.back_button, self.minimize_button]
+        buttons = [self.back_button, self.notify_button, self.publish_moment_button, self.refresh_moments_button, self.minimize_button]
         if not any(buttons):
             return
         dark = isDarkTheme()
