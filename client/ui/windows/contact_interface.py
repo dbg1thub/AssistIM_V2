@@ -16,7 +16,6 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRect,
     QRectF,
-    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -30,7 +29,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    FluentIcon,
     FluentStyleSheet,
     IconWidget,
     InfoBar,
@@ -50,9 +48,7 @@ from qfluentwidgets import (
     themeColor,
 )
 from qframelesswindow.titlebar import CloseButton
-from qframelesswindow.titlebar.title_bar_buttons import MinimizeButton, TitleBarButton
 from shiboken6 import isValid as is_valid_qt_object
-from qfluentwidgets.common.icon import drawIcon
 
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core import logging
@@ -80,7 +76,7 @@ from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
-from client.ui.widgets.fluent_dialog import FluentDialog
+from client.ui.widgets.fluent_dialog import FluentDialog, FluentDialogTitleButton
 from client.ui.widgets.contact_shared import (
     CONTACT_SIDEBAR_AVATAR_SIZE,
     CONTACT_SIDEBAR_CONTENT_GAP,
@@ -992,59 +988,6 @@ class GalleryContactDetailPanel(QWidget):
             button.setEnabled(available)
 
 
-class FriendMomentsTitleIconButton(TitleBarButton):
-    """Title-bar icon button painted with the same state model as native title buttons."""
-
-    def __init__(self, icon, parent=None) -> None:
-        super().__init__(parent)
-        self._icon = icon
-        self.setIconSize(QSize(16, 16))
-
-    def _background_path(self) -> QPainterPath:
-        path = QPainterPath()
-        path.addRect(QRectF(self.rect()))
-        return path
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
-        color, bg_color = self._getColors()
-
-        painter.setBrush(bg_color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawPath(self._background_path())
-
-        icon_size = self.iconSize()
-        icon_rect = QRectF(
-            (self.width() - icon_size.width()) / 2,
-            (self.height() - icon_size.height()) / 2,
-            icon_size.width(),
-            icon_size.height(),
-        )
-        drawIcon(self._icon, painter, icon_rect, fill=color.name())
-
-
-class FriendMomentsBackButton(FriendMomentsTitleIconButton):
-    """Title-bar back button with a rounded top-left hover surface."""
-
-    def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
-        super().__init__(FluentIcon.RETURN, parent)
-        self._corner_radius = max(0, int(corner_radius or 0))
-
-    def _background_path(self) -> QPainterPath:
-        rect = QRectF(self.rect())
-        radius = min(float(self._corner_radius), rect.width(), rect.height())
-        path = QPainterPath()
-        path.moveTo(rect.left() + radius, rect.top())
-        path.lineTo(rect.right(), rect.top())
-        path.lineTo(rect.right(), rect.bottom())
-        path.lineTo(rect.left(), rect.bottom())
-        path.lineTo(rect.left(), rect.top() + radius)
-        path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
-        path.closeSubpath()
-        return path
-
-
 class FriendMomentsDialog(FluentDialog):
     """Placeholder dialog for one friend's moments timeline."""
 
@@ -1064,11 +1007,11 @@ class FriendMomentsDialog(FluentDialog):
         self.page_stack: QStackedWidget | None = None
         self.friend_moments_page: QWidget | None = None
         self.my_moments_page: QWidget | None = None
-        self.back_button: FriendMomentsBackButton | None = None
-        self.minimize_button: MinimizeButton | None = None
-        self.notify_button: FriendMomentsTitleIconButton | None = None
-        self.publish_moment_button: FriendMomentsTitleIconButton | None = None
-        self.refresh_moments_button: FriendMomentsTitleIconButton | None = None
+        self.back_button: FluentDialogTitleButton | None = None
+        self.minimize_button: FluentDialogTitleButton | None = None
+        self.notify_button: FluentDialogTitleButton | None = None
+        self.publish_moment_button: FluentDialogTitleButton | None = None
+        self.refresh_moments_button: FluentDialogTitleButton | None = None
         super().__init__(parent=parent, title="")
         self.setObjectName("FriendMomentsDialog")
         self.setWindowTitle("")
@@ -1081,35 +1024,34 @@ class FriendMomentsDialog(FluentDialog):
         self.content_widget.setMouseTracking(True)
         self.content_widget.installEventFilter(self)
 
-        self.back_button = FriendMomentsBackButton(self.title_bar, corner_radius=self._radius)
-        self.back_button.setObjectName("friendMomentsBackButton")
-        self.back_button.setToolTip(tr("common.back", "Back"))
-        self.back_button.clicked.connect(self._switch_to_my_moments)
-
-        self.minimize_button = MinimizeButton(self.title_bar)
-        self.minimize_button.setObjectName("friendMomentsMinimizeButton")
-        self.minimize_button.setToolTip(tr("common.minimize", "Minimize"))
-        self.minimize_button.clicked.connect(self.showMinimized)
-
-        self.notify_button = FriendMomentsTitleIconButton(CollectionIcon("alert"), self.title_bar)
-        self.notify_button.setObjectName("friendMomentsNotifyButton")
-        self.notify_button.setToolTip(tr("discovery.notifications.button", "Notifications"))
-        self.publish_moment_button = FriendMomentsTitleIconButton(AppIcon.ADD, self.title_bar)
-        self.publish_moment_button.setObjectName("friendMomentsPublishButton")
-        self.publish_moment_button.setToolTip(tr("discovery.feed.publish_button", "Publish Moment"))
-        self.refresh_moments_button = FriendMomentsTitleIconButton(AppIcon.SYNC, self.title_bar)
-        self.refresh_moments_button.setObjectName("friendMomentsRefreshButton")
-        self.refresh_moments_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
-
-        self._apply_friend_title_button_colors()
-
-        title_layout = self.title_bar.layout()
-        if isinstance(title_layout, QHBoxLayout):
-            title_layout.insertWidget(0, self.back_button, 0, Qt.AlignmentFlag.AlignTop)
-            title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignTop)
-            title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignTop)
-            title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignTop)
-            title_layout.insertWidget(title_layout.count() - 1, self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.back_button = self.add_title_left_button(
+            self._title_icon_back_path,
+            corner="left",
+            tooltip=tr("common.back", "Back"),
+            on_clicked=self._switch_to_my_moments,
+            object_name="friendMomentsBackButton",
+        )
+        self.notify_button = self.add_title_left_button(
+            self._title_icon_alert_path,
+            tooltip=tr("discovery.notifications.button", "Notifications"),
+            object_name="friendMomentsNotifyButton",
+        )
+        self.publish_moment_button = self.add_title_left_button(
+            self._title_icon_add_path,
+            tooltip=tr("discovery.feed.publish_button", "Publish Moment"),
+            object_name="friendMomentsPublishButton",
+        )
+        self.refresh_moments_button = self.add_title_left_button(
+            self._title_icon_refresh_path,
+            tooltip=tr("discovery.feed.refresh_tooltip", "Refresh feed"),
+            object_name="friendMomentsRefreshButton",
+        )
+        self.minimize_button = self.add_title_right_button(
+            self._title_icon_minimize_path,
+            tooltip=tr("common.minimize", "Minimize"),
+            on_clicked=self.showMinimized,
+            object_name="friendMomentsMinimizeButton",
+        )
 
         root = self.content_layout
         root.setContentsMargins(0, 0, 0, 0)
@@ -1174,6 +1116,53 @@ class FriendMomentsDialog(FluentDialog):
         if not self._resize_active:
             self.unsetCursor()
         super().leaveEvent(event)
+
+    @staticmethod
+    def _title_icon_back_path(rect: QRectF) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(rect.right() - 2, rect.top() + 2)
+        path.lineTo(rect.left() + 2, rect.center().y())
+        path.lineTo(rect.right() - 2, rect.bottom() - 2)
+        return path
+
+    @staticmethod
+    def _title_icon_alert_path(rect: QRectF) -> QPainterPath:
+        path = QPainterPath()
+        center_x = rect.center().x()
+        path.moveTo(center_x, rect.top() + 1.5)
+        path.cubicTo(rect.left() + 2, rect.top() + 2, rect.left() + 2, rect.center().y(), rect.left() + 2, rect.bottom() - 3)
+        path.lineTo(rect.right() - 2, rect.bottom() - 3)
+        path.cubicTo(rect.right() - 2, rect.center().y(), rect.right() - 2, rect.top() + 2, center_x, rect.top() + 1.5)
+        path.moveTo(center_x - 2, rect.bottom() - 1)
+        path.lineTo(center_x + 2, rect.bottom() - 1)
+        return path
+
+    @staticmethod
+    def _title_icon_add_path(rect: QRectF) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(rect.left() + 1.5, rect.center().y())
+        path.lineTo(rect.right() - 1.5, rect.center().y())
+        path.moveTo(rect.center().x(), rect.top() + 1.5)
+        path.lineTo(rect.center().x(), rect.bottom() - 1.5)
+        return path
+
+    @staticmethod
+    def _title_icon_refresh_path(rect: QRectF) -> QPainterPath:
+        path = QPainterPath()
+        arc_rect = rect.adjusted(1.5, 1.5, -1.5, -1.5)
+        path.arcMoveTo(arc_rect, 35)
+        path.arcTo(arc_rect, 35, 280)
+        path.moveTo(rect.right() - 2.5, rect.top() + 2.5)
+        path.lineTo(rect.right() - 1, rect.top() + 5.5)
+        path.lineTo(rect.right() - 4.2, rect.top() + 4.8)
+        return path
+
+    @staticmethod
+    def _title_icon_minimize_path(rect: QRectF) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(rect.left() + 1, rect.center().y())
+        path.lineTo(rect.right() - 1, rect.center().y())
+        return path
 
     def _create_friend_moments_page(self) -> QWidget:
         page = QWidget(self.page_stack)
@@ -1337,29 +1326,6 @@ class FriendMomentsDialog(FluentDialog):
         self._resize_active = False
         self._resize_edge = ""
         self.unsetCursor()
-
-    def _apply_fluent_surface(self) -> None:
-        super()._apply_fluent_surface()
-        self._apply_friend_title_button_colors()
-
-    def _apply_friend_title_button_colors(self) -> None:
-        buttons = [self.back_button, self.notify_button, self.publish_moment_button, self.refresh_moments_button, self.minimize_button]
-        if not any(buttons):
-            return
-        dark = isDarkTheme()
-        text_color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
-        hover_bg = QColor(255, 255, 255, 26) if dark else QColor(0, 0, 0, 26)
-        pressed_bg = QColor(255, 255, 255, 51) if dark else QColor(0, 0, 0, 51)
-        for button in buttons:
-            if button is None:
-                continue
-            button.setNormalColor(text_color)
-            button.setHoverColor(text_color)
-            button.setPressedColor(text_color)
-            button.setNormalBackgroundColor(QColor(0, 0, 0, 0))
-            button.setHoverBackgroundColor(hover_bg)
-            button.setPressedBackgroundColor(pressed_bg)
-
 
 class UserSearchItem(CardWidget):
     add_clicked = Signal(str)

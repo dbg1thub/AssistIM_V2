@@ -597,10 +597,17 @@ def test_contact_interface_no_longer_embeds_moments_panel() -> None:
 
 def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    fluent_dialog = Path('client/ui/widgets/fluent_dialog.py').read_text(encoding='utf-8')
 
     assert 'class FriendMomentsDialog(FluentDialog):' in contact_interface
-    assert 'class FriendMomentsTitleIconButton(TitleBarButton):' in contact_interface
-    assert 'class FriendMomentsBackButton(FriendMomentsTitleIconButton):' in contact_interface
+    assert 'class FluentDialogTitleButton(TitleBarButton):' in fluent_dialog
+    assert 'def add_title_left_button(' in fluent_dialog
+    assert 'def add_title_right_button(' in fluent_dialog
+    assert 'path_factory: Callable[[QRectF], QPainterPath]' in fluent_dialog
+    assert 'pen = QPen(color, 1)' in fluent_dialog
+    assert 'pen.setCosmetic(True)' in fluent_dialog
+    assert 'self._title_buttons.append(button)' in fluent_dialog
+    assert 'self._sync_title_button_colors(text_color)' in fluent_dialog
     assert 'super().__init__(parent=parent, title="")' in contact_interface
     assert 'self.setWindowTitle("")' in contact_interface
     assert 'self.title_label.setText("")' in contact_interface
@@ -609,21 +616,33 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
     assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
-    assert 'self.minimize_button = MinimizeButton(self.title_bar)' in contact_interface
-    assert 'self.back_button = FriendMomentsBackButton(self.title_bar, corner_radius=self._radius)' in contact_interface
+    assert 'self.minimize_button = self.add_title_right_button(' in contact_interface
+    assert 'self._title_icon_minimize_path' in contact_interface
+    assert 'self.back_button = self.add_title_left_button(' in contact_interface
+    assert 'self._title_icon_back_path' in contact_interface
+    assert 'corner="left"' in contact_interface
     assert 'self.page_stack = QStackedWidget(self.content_widget)' in contact_interface
     assert 'self.friend_moments_page = self._create_friend_moments_page()' in contact_interface
     assert 'self.my_moments_page = self._create_my_moments_page()' in contact_interface
-    assert 'self.notify_button = FriendMomentsTitleIconButton(CollectionIcon("alert"), self.title_bar)' in contact_interface
-    assert 'self.publish_moment_button = FriendMomentsTitleIconButton(AppIcon.ADD, self.title_bar)' in contact_interface
-    assert 'self.refresh_moments_button = FriendMomentsTitleIconButton(AppIcon.SYNC, self.title_bar)' in contact_interface
-    assert 'title_layout.insertWidget(1, self.notify_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
-    assert 'title_layout.insertWidget(2, self.publish_moment_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
-    assert 'title_layout.insertWidget(3, self.refresh_moments_button, 0, Qt.AlignmentFlag.AlignTop)' in contact_interface
-    assert 'buttons = [self.back_button, self.notify_button, self.publish_moment_button, self.refresh_moments_button, self.minimize_button]' in contact_interface
+    assert 'self.notify_button = self.add_title_left_button(' in contact_interface
+    assert 'self._title_icon_alert_path' in contact_interface
+    assert 'self.publish_moment_button = self.add_title_left_button(' in contact_interface
+    assert 'self._title_icon_add_path' in contact_interface
+    assert 'self.refresh_moments_button = self.add_title_left_button(' in contact_interface
+    assert 'self._title_icon_refresh_path' in contact_interface
+    assert 'def _title_icon_back_path(rect: QRectF) -> QPainterPath:' in contact_interface
+    assert 'def _title_icon_alert_path(rect: QRectF) -> QPainterPath:' in contact_interface
+    assert 'def _title_icon_add_path(rect: QRectF) -> QPainterPath:' in contact_interface
+    assert 'def _title_icon_refresh_path(rect: QRectF) -> QPainterPath:' in contact_interface
+    assert 'def _title_icon_minimize_path(rect: QRectF) -> QPainterPath:' in contact_interface
     friend_dialog_block = contact_interface.split('class FriendMomentsDialog(FluentDialog):', 1)[1].split('class UserSearchItem', 1)[0]
     assert 'Qt.AlignmentFlag.AlignVCenter' not in friend_dialog_block
     assert 'TitleLabel(' not in friend_dialog_block
+    assert 'FriendMomentsTitleIconButton' not in contact_interface
+    assert 'FriendMomentsBackButton' not in contact_interface
+    assert 'FluentIcon.RETURN' not in contact_interface
+    assert 'drawIcon(' not in contact_interface
+    assert 'MinimizeButton(self.title_bar)' not in contact_interface
     assert 'PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(CollectionIcon("alert"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(AppIcon.SYNC, self.title_bar)' not in contact_interface

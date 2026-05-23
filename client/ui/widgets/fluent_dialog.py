@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
+from collections.abc import Callable
+
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import SubtitleLabel, isDarkTheme, qconfig
-from qframelesswindow.titlebar.title_bar_buttons import CloseButton
+from qframelesswindow.titlebar.title_bar_buttons import CloseButton, TitleBarButton
 
 
 class FluentDialogCloseButton(CloseButton):
@@ -51,6 +53,71 @@ class FluentDialogCloseButton(CloseButton):
         renderer.render(painter, QRectF(self.rect()))
 
 
+class FluentDialogTitleButton(TitleBarButton):
+    """Reusable FluentDialog title-bar button with caller-provided vector icon geometry."""
+
+    def __init__(
+        self,
+        path_factory: Callable[[QRectF], QPainterPath],
+        parent=None,
+        *,
+        corner: str = "none",
+        corner_radius: int = 12,
+        icon_size: QSize | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._path_factory = path_factory
+        self._corner = str(corner or "none").lower()
+        self._corner_radius = max(0, int(corner_radius or 0))
+        self.setIconSize(icon_size or QSize(12, 12))
+
+    def _background_path(self) -> QPainterPath:
+        rect = QRectF(self.rect())
+        radius = min(float(self._corner_radius), rect.width(), rect.height())
+        path = QPainterPath()
+        if self._corner == "left" and radius > 0:
+            path.moveTo(rect.left() + radius, rect.top())
+            path.lineTo(rect.right(), rect.top())
+            path.lineTo(rect.right(), rect.bottom())
+            path.lineTo(rect.left(), rect.bottom())
+            path.lineTo(rect.left(), rect.top() + radius)
+            path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
+            path.closeSubpath()
+            return path
+        if self._corner == "right" and radius > 0:
+            path.moveTo(rect.left(), rect.top())
+            path.lineTo(rect.right() - radius, rect.top())
+            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
+            path.lineTo(rect.right(), rect.bottom())
+            path.lineTo(rect.left(), rect.bottom())
+            path.closeSubpath()
+            return path
+        path.addRect(rect)
+        return path
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        color, bg_color = self._getColors()
+
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(self._background_path())
+
+        icon_size = self.iconSize()
+        icon_rect = QRectF(
+            (self.width() - icon_size.width()) / 2,
+            (self.height() - icon_size.height()) / 2,
+            icon_size.width(),
+            icon_size.height(),
+        )
+        pen = QPen(color, 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(self._path_factory(icon_rect))
+
+
 class FluentDialog(QDialog):
     """A frameless Fluent visual shell that keeps Qt's standard dialog ownership."""
 
@@ -69,6 +136,7 @@ class FluentDialog(QDialog):
         self._drag_active = False
         self._drag_offset = QPoint()
         self._show_animation_group: QParallelAnimationGroup | None = None
+        self._title_buttons: list[FluentDialogTitleButton] = []
 
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -130,6 +198,71 @@ class FluentDialog(QDialog):
         self._apply_fluent_surface()
         self._sync_title_left_spacer_width()
         self._schedule_title_alignment_sync()
+
+    def add_title_left_button(
+        self,
+        path_factory: Callable[[QRectF], QPainterPath],
+        *,
+        tooltip: str = "",
+        corner: str = "none",
+        on_clicked=None,
+        object_name: str = "",
+    ) -> FluentDialogTitleButton:
+        """Add one custom icon button to the left side of the title bar."""
+        button = FluentDialogTitleButton(path_factory, self.title_bar, corner=corner, corner_radius=self._radius)
+        self._configure_title_button(button, tooltip=tooltip, object_name=object_name, on_clicked=on_clicked)
+        layout = self.title_bar.layout()
+        if isinstance(layout, QHBoxLayout):
+            layout.insertWidget(max(0, layout.indexOf(self.title_left_spacer)), button, 0, Qt.AlignmentFlag.AlignTop)
+        return button
+
+    def add_title_right_button(
+        self,
+        path_factory: Callable[[QRectF], QPainterPath],
+        *,
+        tooltip: str = "",
+        corner: str = "none",
+        on_clicked=None,
+        object_name: str = "",
+    ) -> FluentDialogTitleButton:
+        """Add one custom icon button immediately before the close button."""
+        button = FluentDialogTitleButton(path_factory, self.title_bar, corner=corner, corner_radius=self._radius)
+        self._configure_title_button(button, tooltip=tooltip, object_name=object_name, on_clicked=on_clicked)
+        layout = self.title_bar.layout()
+        if isinstance(layout, QHBoxLayout):
+            close_index = layout.indexOf(self.close_button)
+            layout.insertWidget(close_index if close_index >= 0 else layout.count(), button, 0, Qt.AlignmentFlag.AlignTop)
+        return button
+
+    def _configure_title_button(
+        self,
+        button: FluentDialogTitleButton,
+        *,
+        tooltip: str,
+        object_name: str,
+        on_clicked,
+    ) -> None:
+        if object_name:
+            button.setObjectName(object_name)
+        if tooltip:
+            button.setToolTip(tooltip)
+        if on_clicked is not None:
+            button.clicked.connect(on_clicked)
+        self._title_buttons.append(button)
+        self._sync_title_button_colors(
+            QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
+        )
+
+    def _sync_title_button_colors(self, text_color: QColor) -> None:
+        hover_bg = QColor(255, 255, 255, 26) if isDarkTheme() else QColor(0, 0, 0, 26)
+        pressed_bg = QColor(255, 255, 255, 51) if isDarkTheme() else QColor(0, 0, 0, 51)
+        for button in list(self._title_buttons):
+            button.setNormalColor(text_color)
+            button.setHoverColor(text_color)
+            button.setPressedColor(text_color)
+            button.setNormalBackgroundColor(QColor(0, 0, 0, 0))
+            button.setHoverBackgroundColor(hover_bg)
+            button.setPressedBackgroundColor(pressed_bg)
 
     def setTitleText(self, title: str) -> None:
         self.setWindowTitle(str(title or ""))
@@ -232,6 +365,7 @@ class FluentDialog(QDialog):
         self.close_button.setNormalColor(text_color)
         self.close_button.setHoverColor(QColor(255, 255, 255))
         self.close_button.setPressedColor(QColor(255, 255, 255))
+        self._sync_title_button_colors(text_color)
         self.surface.setStyleSheet(
             f"""
             QFrame#fluentDialogSurface {{
