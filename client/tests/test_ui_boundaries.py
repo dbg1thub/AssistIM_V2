@@ -602,6 +602,9 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'super().__init__(parent=parent, title=title)' in contact_interface
     assert 'self.setObjectName("FriendMomentsDialog")' in contact_interface
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
+    assert 'self.vertical_resize_handle: QWidget | None = None' in contact_interface
+    assert 'handle = self.vertical_resize_handle' in contact_interface
+    assert 'if handle is not None and watched is handle:' in contact_interface
     assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
     assert 'self.minimize_button = TransparentToolButton(CollectionIcon("subtract"), self.title_bar)' in contact_interface
     assert 'self.back_button = TransparentToolButton(CollectionIcon("arrow_left"), self.title_bar)' in contact_interface

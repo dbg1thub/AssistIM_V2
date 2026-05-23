@@ -987,6 +987,7 @@ class FriendMomentsDialog(FluentDialog):
         self._resize_active = False
         self._resize_start_global_y = 0
         self._resize_start_height = 0
+        self.vertical_resize_handle: QWidget | None = None
         display_name = str(contact.display_name or contact.username or contact.id or "").strip()
         title = tr(
             "contact.friend_moments.title",
@@ -1043,7 +1044,8 @@ class FriendMomentsDialog(FluentDialog):
         root.addWidget(self.vertical_resize_handle)
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.vertical_resize_handle:
+        handle = self.vertical_resize_handle
+        if handle is not None and watched is handle:
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 self._resize_active = True
                 self._resize_start_global_y = event.globalPosition().toPoint().y()
