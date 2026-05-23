@@ -123,6 +123,21 @@ def test_websocket_message_signal_uses_python_object_payload() -> None:
     assert "message_received = Signal(dict)" not in source
 
 
+def test_websocket_qt_callback_queue_does_not_touch_timer_from_worker_thread() -> None:
+    source = Path("client/network/websocket_client.py").read_text(encoding="utf-8")
+    signals_block = source.split("class WebSocketSignals(QObject):", 1)[1].split("_SIGNALS_AVAILABLE = True", 1)[0]
+    queue_block = signals_block.split("def queue_callback", 1)[1].split("def clear_callbacks", 1)[0]
+
+    assert "QTimer" not in signals_block
+    assert "_dispatch_timer" not in signals_block
+    assert "dispatch_requested = Signal()" in signals_block
+    assert "self.dispatch_requested.connect(self._drain_callbacks)" in signals_block
+    assert "self.dispatch_requested.emit()" in queue_block
+    assert ".start()" not in queue_block
+    assert ".stop()" not in queue_block
+    assert ".isActive()" not in queue_block
+
+
 def test_websocket_unexpected_disconnect_resets_state_before_reconnect() -> None:
     disconnected_events: list[str] = []
     reconnect_started = asyncio.Event()

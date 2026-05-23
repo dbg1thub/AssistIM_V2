@@ -51,7 +51,7 @@ def _connection_closed_details(exc: BaseException) -> tuple[str, str]:
 
 # Try to import PySide6 signals, fall back to callback if not available
 try:
-    from PySide6.QtCore import QCoreApplication, QTimer, Signal, QObject, Slot
+    from PySide6.QtCore import QCoreApplication, Signal, QObject, Slot
     
     class WebSocketSignals(QObject):
         """PySide6 signals for WebSocket events."""
@@ -67,16 +67,12 @@ try:
             super().__init__()
             self._pending_callbacks: deque[Callable[[], None]] = deque()
             self._callback_lock = threading.Lock()
-            self._dispatch_timer = QTimer(self)
-            self._dispatch_timer.setInterval(10)
-            self._dispatch_timer.timeout.connect(self._drain_callbacks)
-            self._dispatch_timer.start()
+            self.dispatch_requested.connect(self._drain_callbacks)
 
         def queue_callback(self, callback: Callable[[], None]) -> None:
             with self._callback_lock:
                 self._pending_callbacks.append(callback)
-            if not self._dispatch_timer.isActive():
-                self._dispatch_timer.start()
+            self.dispatch_requested.emit()
 
         def clear_callbacks(self) -> None:
             with self._callback_lock:
