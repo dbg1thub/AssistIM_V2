@@ -2007,9 +2007,8 @@ class MomentsNavItem(QFrame):
         self.text_label.setObjectName("momentsNavItemText")
         layout.addWidget(self.text_label, 1)
 
-        badge_value = str(badge_text or "").strip()
-        self.badge_label = InfoBadge(badge_value, self, InfoLevel.ERROR)
-        self.badge_label.setVisible(bool(str(badge_text or "").strip()))
+        self.badge_label = InfoBadge("", self, InfoLevel.ERROR)
+        self.set_badge_text(badge_text)
         layout.addWidget(self.badge_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_active(self, active: bool) -> None:
@@ -2017,6 +2016,11 @@ class MomentsNavItem(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
+
+    def set_badge_text(self, badge_text: str) -> None:
+        badge_value = str(badge_text or "").strip()
+        self.badge_label.setText(badge_value)
+        self.badge_label.setVisible(bool(badge_value) and badge_value != "0")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2148,12 +2152,13 @@ class MomentsLeftPanel(QWidget):
         nav_layout.setSpacing(0)
         self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
         self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))
-        self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"), badge_text="0")
+        self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"))
         self._add_nav_item(
             nav_layout,
             "received_likes",
             AppIcon.HEART,
             tr("discovery.nav.received_likes", "Received Likes"),
+            badge_text="0",
         )
         self._add_nav_item(nav_layout, "saved", AppIcon.FOLDER, tr("discovery.nav.saved", "Saved"))
         self._add_nav_item(nav_layout, "albums", AppIcon.PHOTO, tr("discovery.nav.albums", "Albums"))
@@ -2245,6 +2250,9 @@ class MomentsFeedToolbar(QWidget):
     def _set_active_filter(self, route_key: str) -> None:
         self.feed_filter.setCurrentItem(route_key)
         self.filter_changed.emit(route_key)
+
+    def set_title(self, title: str) -> None:
+        self.title_label.setText(title)
 
 
 class MomentsComposePrompt(BodyLabel):
@@ -2392,7 +2400,14 @@ class MomentsFeedPage(QWidget):
 
     filter_changed = Signal(str, str)
 
-    def __init__(self, scope_key: str = "feed", parent=None, *, show_compose: bool = True):
+    def __init__(
+        self,
+        scope_key: str = "feed",
+        parent=None,
+        *,
+        title: str = "",
+        show_compose: bool = True,
+    ):
         super().__init__(parent)
         self.setObjectName("MomentsFeedPage")
         self.scope_key = str(scope_key or "feed")
@@ -2404,6 +2419,7 @@ class MomentsFeedPage(QWidget):
         layout.setSpacing(0)
 
         self.toolbar = MomentsFeedToolbar(self)
+        self.toolbar.set_title(title or tr("discovery.feed.title", "Moments"))
         self.compose_bar = MomentsComposeBar(self)
         self.feed_stack = AnimatedStackWidget(self)
         self.all_feed_list = MomentsFeedList(self.feed_stack)
@@ -2486,10 +2502,28 @@ class MomentsFeedPanel(QWidget):
         layout.setSpacing(0)
 
         self.page_stack = AnimatedStackWidget(self)
-        self.friends_feed_page = MomentsFeedPage("feed", self.page_stack)
-        self.my_moments_page = MomentsFeedPage("mine", self.page_stack)
-        self.liked_moments_page = MomentsFeedPage("liked", self.page_stack, show_compose=False)
-        self.received_likes_page = MomentsFeedPage("received_likes", self.page_stack, show_compose=False)
+        self.friends_feed_page = MomentsFeedPage(
+            "feed",
+            self.page_stack,
+            title=tr("discovery.nav.feed", "Friends Feed"),
+        )
+        self.my_moments_page = MomentsFeedPage(
+            "mine",
+            self.page_stack,
+            title=tr("discovery.nav.mine", "My Moments"),
+        )
+        self.liked_moments_page = MomentsFeedPage(
+            "liked",
+            self.page_stack,
+            title=tr("discovery.nav.likes", "My Likes"),
+            show_compose=False,
+        )
+        self.received_likes_page = MomentsFeedPage(
+            "received_likes",
+            self.page_stack,
+            title=tr("discovery.nav.received_likes", "Received Likes"),
+            show_compose=False,
+        )
         self.real_pages: dict[str, MomentsFeedPage] = {
             "feed": self.friends_feed_page,
             "mine": self.my_moments_page,

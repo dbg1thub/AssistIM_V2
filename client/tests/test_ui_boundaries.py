@@ -610,10 +610,19 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'discovery.profile.avatar_fallback' not in profile_block
     assert 'discovery.profile.avatar_fallback' not in compose_bar_block
     assert 'self.page_stack = AnimatedStackWidget(self)' in feed_panel_block
-    assert 'self.friends_feed_page = MomentsFeedPage("feed", self.page_stack)' in feed_panel_block
-    assert 'self.my_moments_page = MomentsFeedPage("mine", self.page_stack)' in feed_panel_block
-    assert 'self.liked_moments_page = MomentsFeedPage("liked", self.page_stack, show_compose=False)' in feed_panel_block
-    assert 'self.received_likes_page = MomentsFeedPage("received_likes", self.page_stack, show_compose=False)' in feed_panel_block
+    assert 'self.friends_feed_page = MomentsFeedPage(' in feed_panel_block
+    assert '"feed",' in feed_panel_block
+    assert 'title=tr("discovery.nav.feed", "Friends Feed"),' in feed_panel_block
+    assert 'self.my_moments_page = MomentsFeedPage(' in feed_panel_block
+    assert '"mine",' in feed_panel_block
+    assert 'title=tr("discovery.nav.mine", "My Moments"),' in feed_panel_block
+    assert 'self.liked_moments_page = MomentsFeedPage(' in feed_panel_block
+    assert '"liked",' in feed_panel_block
+    assert 'title=tr("discovery.nav.likes", "My Likes"),' in feed_panel_block
+    assert 'show_compose=False,' in feed_panel_block
+    assert 'self.received_likes_page = MomentsFeedPage(' in feed_panel_block
+    assert '"received_likes",' in feed_panel_block
+    assert 'title=tr("discovery.nav.received_likes", "Received Likes"),' in feed_panel_block
     assert 'self.placeholder_pages: dict[str, MomentsPlaceholderPage] = {' in feed_panel_block
     assert '"likes": MomentsPlaceholderPage(' not in feed_panel_block
     assert '"saved": MomentsPlaceholderPage(' in feed_panel_block
@@ -648,6 +657,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in nav_item_block
     assert '"received_likes"' in left_panel_block
     assert 'AppIcon.HEART' in left_panel_block
+    assert 'def set_badge_text(self, badge_text: str) -> None:' in nav_item_block
+    assert 'self.badge_label.setVisible(bool(badge_value) and badge_value != "0")' in nav_item_block
+    likes_nav_block = left_panel_block.split('"likes"', 1)[1].split('"received_likes"', 1)[0]
+    received_likes_nav_block = left_panel_block.split('"received_likes"', 1)[1].split('"saved"', 1)[0]
+    assert 'badge_text=' not in likes_nav_block
+    assert 'badge_text="0"' in received_likes_nav_block
     assert 'nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)' not in left_panel_block
     assert 'layout.setContentsMargins(20, 12, 20, 12)' not in feed_toolbar_block
     assert 'layout.setContentsMargins(20, 12, 20, 12)' not in compose_bar_block
@@ -723,7 +738,11 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'filter_changed = Signal(str)' in feed_toolbar_block
     assert 'self.feed_filter.addItem(routeKey="all", text=tr("discovery.feed.tab_all", "All"), onClick=lambda: self._set_active_filter("all"))' in discovery_interface
     assert 'self.filter_changed.emit(route_key)' in feed_toolbar_block
+    assert 'def set_title(self, title: str) -> None:' in feed_toolbar_block
+    assert 'self.title_label.setText(title)' in feed_toolbar_block
     assert 'self.feed_stack = AnimatedStackWidget(self)' in feed_page_block
+    assert 'title: str = "",' in feed_page_block
+    assert 'self.toolbar.set_title(title or tr("discovery.feed.title", "Moments"))' in feed_page_block
     assert 'self.all_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
     assert 'filter_changed = Signal(str, str)' in feed_page_block
     assert 'self.media_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
