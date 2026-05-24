@@ -2027,11 +2027,25 @@ def test_contact_interface_request_actions_update_locally() -> None:
 def test_contact_interface_reloads_contact_domain_after_reconnect() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
-    assert 'self._connection_manager.add_state_listener(self._on_connection_state_changed)' in contact_interface
+    assert 'contact_sync_requested = Signal(object)' in contact_interface
+    assert 'connection_state_changed_requested = Signal(object, object)' in contact_interface
+    assert 'self.contact_sync_requested.connect(self._on_contact_sync_required)' in contact_interface
+    assert 'self.connection_state_changed_requested.connect(self._on_connection_state_changed)' in contact_interface
+    assert 'self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._dispatch_contact_sync_required)' in contact_interface
+    assert 'self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)' not in contact_interface
+    assert 'self._connection_manager.add_state_listener(self._dispatch_connection_state_changed)' in contact_interface
+    assert 'self._connection_manager.add_state_listener(self._on_connection_state_changed)' not in contact_interface
+    assert 'def _dispatch_contact_sync_required(self, payload: object) -> None:' in contact_interface
+    assert 'self.contact_sync_requested.emit(payload)' in contact_interface
+    assert 'def _dispatch_connection_state_changed(self, old_state: object, new_state: object) -> None:' in contact_interface
+    assert 'self.connection_state_changed_requested.emit(old_state, new_state)' in contact_interface
     assert 'def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:' in contact_interface
     assert 'if old_state == ConnectionState.CONNECTED or new_state != ConnectionState.CONNECTED:' in contact_interface
     assert 'self.reload_data()' in contact_interface.split('def _on_connection_state_changed', 1)[1].split('def _can_update_contact_ui', 1)[0]
-    assert 'self._connection_manager.remove_state_listener(self._on_connection_state_changed)' in contact_interface
+    assert 'self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._dispatch_contact_sync_required)' in contact_interface
+    assert 'self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)' not in contact_interface
+    assert 'self._connection_manager.remove_state_listener(self._dispatch_connection_state_changed)' in contact_interface
+    assert 'self._connection_manager.remove_state_listener(self._on_connection_state_changed)' not in contact_interface
 
 
 def test_search_flyout_close_no_longer_clears_keywords() -> None:

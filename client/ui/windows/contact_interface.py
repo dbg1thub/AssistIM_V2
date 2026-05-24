@@ -1780,6 +1780,8 @@ class AddFriendDialog(FluentDialog):
 class ContactInterface(QWidget):
     message_requested = Signal(object)
     call_requested = Signal(object, str)
+    contact_sync_requested = Signal(object)
+    connection_state_changed_requested = Signal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1929,8 +1931,10 @@ class ContactInterface(QWidget):
         self.detail_panel.remark_edit_requested.connect(self._on_friend_remark_edit_requested)
         self.detail_panel.friend_moments_requested.connect(self._on_friend_moments_requested)
         self.detail_panel.detail_more_requested.connect(self._show_friend_detail_more_menu)
-        self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
-        self._connection_manager.add_state_listener(self._on_connection_state_changed)
+        self.contact_sync_requested.connect(self._on_contact_sync_required)
+        self.connection_state_changed_requested.connect(self._on_connection_state_changed)
+        self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._dispatch_contact_sync_required)
+        self._connection_manager.add_state_listener(self._dispatch_connection_state_changed)
 
     def _create_scroll_page(self) -> tuple[ScrollArea, QWidget, QVBoxLayout]:
         area = ScrollArea(self)
@@ -1978,6 +1982,12 @@ class ContactInterface(QWidget):
         logger.info("Contact interface reload requested")
         self._set_load_task(self._reload_data_async())
 
+    def _dispatch_contact_sync_required(self, payload: object) -> None:
+        """Marshal contact-domain events onto the Qt UI thread before touching widgets."""
+        if self._destroyed:
+            return
+        self.contact_sync_requested.emit(payload)
+
     def _on_contact_sync_required(self, payload: object) -> None:
         """Refresh only the affected contact-domain slices when realtime mutations arrive."""
         if self._destroyed:
@@ -2017,6 +2027,12 @@ class ContactInterface(QWidget):
                 self._refresh_search_surface()
                 return
         self.reload_data()
+
+    def _dispatch_connection_state_changed(self, old_state: object, new_state: object) -> None:
+        """Marshal connection state listener callbacks onto the Qt UI thread."""
+        if self._destroyed:
+            return
+        self.connection_state_changed_requested.emit(old_state, new_state)
 
     def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
         """Refresh contact-domain truth after reconnect because contact_refresh is not replayed."""
@@ -3739,8 +3755,8 @@ class ContactInterface(QWidget):
             return
         self._teardown_started = True
         self._destroyed = True
-        self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
-        self._connection_manager.remove_state_listener(self._on_connection_state_changed)
+        self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._dispatch_contact_sync_required)
+        self._connection_manager.remove_state_listener(self._dispatch_connection_state_changed)
         self._search_timer.stop()
         self._cancel_pending_task(self._search_task)
         self._search_task = None
