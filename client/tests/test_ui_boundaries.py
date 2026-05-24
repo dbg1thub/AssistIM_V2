@@ -1800,8 +1800,10 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
 
     light_input_card_block = light_input_qss.split('QWidget#messageInputCard {', 1)[1].split('}', 1)[0]
     dark_input_card_block = dark_input_qss.split('QWidget#messageInputCard {', 1)[1].split('}', 1)[0]
-    assert 'background: rgba(255, 255, 255, 245);' in light_input_card_block
-    assert 'background: rgba(31, 31, 31, 245);' in dark_input_card_block
+    assert 'background: rgba(255, 255, 255, 184);' in light_input_card_block
+    assert 'background: rgba(31, 31, 31, 184);' in dark_input_card_block
+    assert 'background: rgba(255, 255, 255, 245);' not in light_input_card_block
+    assert 'background: rgba(31, 31, 31, 245);' not in dark_input_card_block
     assert 'background: rgba(255, 255, 255, 170);' not in light_input_card_block
     assert 'background: rgba(255, 255, 255, 13);' not in dark_input_card_block
     assert 'background: rgba(255, 255, 255, 0.96);' not in light_input_card_block

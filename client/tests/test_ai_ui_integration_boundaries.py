@@ -958,8 +958,10 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assert "def _sync_message_bottom_reserved_height(self, height: int) -> None:" in assistant_interface
     assert "def _layout_message_scrollbar(self, *, input_top_y: int) -> None:" in assistant_interface
     assert "setMask(" not in assistant_interface
-    assert 'input_bg = "rgba(31, 31, 31, 245)"' in assistant_interface
-    assert 'input_bg = "rgba(255, 255, 255, 245)"' in assistant_interface
+    assert 'input_bg = "rgba(31, 31, 31, 184)"' in assistant_interface
+    assert 'input_bg = "rgba(255, 255, 255, 184)"' in assistant_interface
+    assert 'input_bg = "rgba(31, 31, 31, 245)"' not in assistant_interface
+    assert 'input_bg = "rgba(255, 255, 255, 245)"' not in assistant_interface
     assert 'input_bg = "rgba(255, 255, 255, 13)"' not in assistant_interface
     assert 'input_bg = "rgba(255, 255, 255, 170)"' not in assistant_interface
     assert 'input_bg = "rgba(31, 31, 31, 0.96)"' not in assistant_interface
