@@ -740,6 +740,61 @@ def test_generated_user_avatar_builder_writes_png() -> None:
     assert avatar_path.read_bytes().startswith(b"\x89PNG")
 
 
+def test_generated_user_avatar_color_is_stable_and_distributed_for_same_initial() -> None:
+    from app.media.generated_avatars import _background_color, _foreground_color
+
+    seed = "user-1|alice|A|Alice"
+    assert _background_color(seed) == _background_color(seed)
+    assert _foreground_color(_background_color(seed)) == _foreground_color(_background_color(seed))
+
+    backgrounds = {
+        _background_color(f"user-{index}|same-initial-{index}|A|Alice {index}")
+        for index in range(24)
+    }
+
+    assert len(backgrounds) >= 20
+    for background in backgrounds:
+        foreground = _foreground_color(background)
+        assert all(0 <= channel <= 255 for channel in background)
+        assert all(0 <= channel <= 255 for channel in foreground)
+        assert foreground[0] < background[0]
+        assert foreground[1] < background[1]
+        assert foreground[2] < background[2]
+
+
+def test_generated_user_avatar_initial_is_visually_centered() -> None:
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from app.media.generated_avatars import build_generated_user_avatar
+
+    upload_dir = Path("server/.testdata/generated-avatar-centering")
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    settings = SimpleNamespace(upload_dir=str(upload_dir), media_public_base_url="/uploads")
+    avatar_url = build_generated_user_avatar(settings, user_id="center-user", username="center", nickname="A", size=192)
+    avatar_path = upload_dir / avatar_url.removeprefix("/uploads/")
+    image = Image.open(avatar_path).convert("RGBA")
+    background = image.getpixel((0, 0))
+    points = [
+        (x, y)
+        for y in range(image.height)
+        for x in range(image.width)
+        if image.getpixel((x, y)) != background
+    ]
+    assert points
+    min_x = min(x for x, _y in points)
+    max_x = max(x for x, _y in points)
+    min_y = min(y for _x, y in points)
+    max_y = max(y for _x, y in points)
+
+    assert abs(((min_x + max_x) / 2) - (image.width / 2)) <= 1.0
+    assert abs(((min_y + max_y) / 2) - (image.height / 2)) <= 1.0
+
+
 def test_generated_user_avatar_initial_uses_bold_font_and_stroke() -> None:
     source = Path("server/app/media/generated_avatars.py").read_text(encoding="utf-8")
     candidate_block = source.split("def _candidate_font_paths", 1)[1]

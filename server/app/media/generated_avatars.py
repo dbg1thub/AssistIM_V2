@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import os
 from pathlib import Path
@@ -13,16 +14,6 @@ from app.media.storage import LocalMediaStorage
 
 
 _GENERATED_AVATAR_SUBDIR = "generated_avatars"
-_PALETTE = (
-    "#D9E8FF",
-    "#DDF3E4",
-    "#FBE6D4",
-    "#F3E3FF",
-    "#FFE1E8",
-    "#E7ECF3",
-    "#E5F3F3",
-    "#FFF0C7",
-)
 
 
 def build_generated_user_avatar(
@@ -39,11 +30,11 @@ def build_generated_user_avatar(
         return ""
 
     initial = _avatar_initial(nickname, username=username)
-    seed = f"{normalized_user_id}|{str(username or '').strip()}|{initial}"
+    seed = f"{normalized_user_id}|{str(username or '').strip()}|{initial}|{str(nickname or '').strip()}"
     background = _background_color(seed)
     foreground = _foreground_color(background)
     output_size = max(64, int(size or 192))
-    digest = hashlib.sha256(f"{seed}|{str(nickname or '').strip()}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
     storage_key = f"{_GENERATED_AVATAR_SUBDIR}/{normalized_user_id}_{digest}.png"
     target_path = Path(settings.upload_dir) / Path(storage_key)
@@ -60,7 +51,7 @@ def build_generated_user_avatar(
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     draw.text(
-        ((output_size - text_width) / 2 - bbox[0], (output_size - text_height) / 2 - bbox[1] - output_size * 0.02),
+        ((output_size - text_width) / 2 - bbox[0], (output_size - text_height) / 2 - bbox[1]),
         initial,
         font=font,
         fill=foreground,
@@ -98,8 +89,11 @@ def _avatar_initial(nickname: object, *, username: object = "") -> str:
 
 def _background_color(seed: str) -> tuple[int, int, int, int]:
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
-    color = _PALETTE[int.from_bytes(digest[:2], "big") % len(_PALETTE)]
-    return (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16), 255)
+    hue = int.from_bytes(digest[:2], "big") / 65535.0
+    saturation = 0.32 + (digest[2] / 255.0) * 0.16
+    value = 0.88 + (digest[3] / 255.0) * 0.08
+    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+    return (round(red * 255), round(green * 255), round(blue * 255), 255)
 
 
 def _foreground_color(background: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
