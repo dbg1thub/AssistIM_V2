@@ -938,14 +938,41 @@ def test_discovery_video_tiles_use_existing_thumbnail_cache() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
     assert 'from client.core.video_thumbnail_cache import get_video_thumbnail_cache' in discovery_interface
+    assert 'from client.core.moment_video_cache import get_moment_video_cache' in discovery_interface
     assert 'self._video_thumbnail_cache = get_video_thumbnail_cache()' in discovery_interface
+    assert 'self._video_cache = get_moment_video_cache()' in discovery_interface
     assert 'self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)' in discovery_interface
     assert 'self._video_labels_by_source: dict[str, QLabel] = {}' in discovery_interface
     assert 'def _apply_video_placeholder(self, label: QLabel, width: int, height: int) -> None:' in discovery_interface
     assert 'def _apply_video_thumbnail(self, label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:' in discovery_interface
     assert 'def _on_video_thumbnail_ready(self, source: str) -> None:' in discovery_interface
     assert 'self._video_thumbnail_cache.request_thumbnail(source)' in discovery_interface
-    assert 'if source and Path(source).exists():' in discovery_interface
+    assert 'def _request_remote_video_thumbnail(self, source: str, media: MomentMediaRecord) -> None:' in discovery_interface
+    assert 'local_source = str(cached_path)' in discovery_interface
+    assert 'self._video_thumbnail_cache.request_thumbnail(local_source)' in discovery_interface
+
+
+def test_discovery_moment_video_playback_uses_app_player_and_auth_cache() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    moment_card_block = discovery_interface.split('class MomentCard(QWidget):', 1)[1].split(
+        'MOMENTS_PANEL_CONTENT_MARGIN',
+        1,
+    )[0]
+    discovery_block = discovery_interface.split('class DiscoveryInterface(QWidget):', 1)[1]
+
+    assert 'from qfluentwidgets.multimedia import VideoWidget' in discovery_interface
+    assert 'QDesktopServices' not in discovery_interface
+    assert 'video_requested = Signal(str, str)' in moment_card_block
+    assert 'self.media_grid.video_requested.connect(self.video_requested.emit)' in moment_card_block
+    assert 'QDesktopServices.openUrl' not in moment_card_block
+    assert 'self.video_requested.emit(source, media.original_name)' in discovery_interface
+    assert 'card.video_requested.connect(self._request_moment_video)' in discovery_block
+    assert 'def _request_moment_video(self, source: str, original_name: str = "") -> None:' in discovery_block
+    assert 'async def _open_moment_video_async(self, source: str, original_name: str = "") -> None:' in discovery_block
+    assert 'await self._moment_video_cache.ensure_cached(' in discovery_block
+    assert 'original_name=original_name' in discovery_block
+    assert 'viewer = VideoWidget()' in discovery_block
+    assert 'viewer.setVideo(QUrl.fromLocalFile(str(local_path.resolve())))' in discovery_block
 
 
 def test_discovery_ui_exposes_moment_privacy_entry_points() -> None:

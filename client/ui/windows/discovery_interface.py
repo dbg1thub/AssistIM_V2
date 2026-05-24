@@ -10,7 +10,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QStringListModel, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeyEvent, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -48,6 +48,7 @@ from qfluentwidgets import (
     TitleLabel,
     TransparentToolButton,
 )
+from qfluentwidgets.multimedia import VideoWidget
 
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core import logging
@@ -57,6 +58,7 @@ from client.core.config_backend import get_config
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
+from client.core.moment_video_cache import get_moment_video_cache
 from client.core.video_thumbnail_cache import get_video_thumbnail_cache
 from client.events.event_bus import get_event_bus
 from client.events.moment_events import MomentEvent
@@ -373,7 +375,7 @@ class MomentMediaGrid(QWidget):
     """Responsive grid for moment image and video attachments."""
 
     image_requested = Signal(str)
-    video_requested = Signal(str)
+    video_requested = Signal(str, str)
 
     def __init__(self, media: list[MomentMediaRecord], parent=None, *, compact: bool = False):
         super().__init__(parent)
@@ -383,18 +385,22 @@ class MomentMediaGrid(QWidget):
         self._network_manager.finished.connect(self._on_image_loaded)
         self._pending_replies: dict[QNetworkReply, QLabel] = {}
         self._video_thumbnail_cache = get_video_thumbnail_cache()
+        self._video_cache = get_moment_video_cache()
         self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
         self._video_labels_by_source: dict[str, QLabel] = {}
+        self._video_cache_tasks: dict[str, asyncio.Task] = {}
         self._layout = QGridLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(8)
         self._layout.setVerticalSpacing(8)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        self.destroyed.connect(lambda *_args: self._cancel_video_cache_tasks())
         self.set_media(media)
 
     def set_media(self, media: list[MomentMediaRecord]) -> None:
         """Replace the preview media set and rebuild the grid."""
+        self._cancel_video_cache_tasks()
         for reply in list(self._pending_replies):
             try:
                 reply.abort()
@@ -437,17 +443,23 @@ class MomentMediaGrid(QWidget):
     def _load_media(self, label: QLabel, media: MomentMediaRecord, width: int, height: int) -> None:
         if media.is_video:
             label.setProperty("momentMediaKind", "video")
-            source = self._resolve_media_source(media)
+            media_source = self._resolve_media_source(media)
+            if media_source:
+                label.setProperty("momentVideoSource", media_source)
+            source = self._resolve_video_thumbnail_source(media_source, media)
             if source:
                 self._video_labels_by_source[source] = label
-                label.setProperty("momentVideoSource", source)
                 thumbnail = self._video_thumbnail_cache.get_thumbnail(source)
                 if thumbnail is not None:
                     self._apply_video_thumbnail(label, thumbnail, width, height)
                     return
             self._apply_video_placeholder(label, width, height)
-            if source and Path(source).exists():
+            if source:
                 self._video_thumbnail_cache.request_thumbnail(source)
+                return
+            if media_source:
+                self._video_labels_by_source[media_source] = label
+                self._request_remote_video_thumbnail(media_source, media)
             return
 
         source = self._resolve_media_source(media)
@@ -495,6 +507,63 @@ class MomentMediaGrid(QWidget):
             self._apply_video_thumbnail(label, thumbnail, label.width(), label.height())
         except RuntimeError:
             self._video_labels_by_source.pop(source, None)
+
+    def _resolve_video_thumbnail_source(self, source: str, media: MomentMediaRecord) -> str:
+        if not source:
+            return ""
+        if Path(source).exists():
+            return source
+        cached_path = self._video_cache.get_cached_path(source, original_name=media.original_name)
+        return str(cached_path) if cached_path is not None else ""
+
+    def _request_remote_video_thumbnail(self, source: str, media: MomentMediaRecord) -> None:
+        if not source.startswith(("http://", "https://")):
+            return
+        if source in self._video_cache_tasks:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        task = loop.create_task(self._cache_remote_video_thumbnail(source, media))
+        self._video_cache_tasks[source] = task
+        task.add_done_callback(lambda finished, video_source=source: self._finalize_remote_video_thumbnail(video_source, finished))
+
+    async def _cache_remote_video_thumbnail(self, source: str, media: MomentMediaRecord) -> None:
+        cached_path = await self._video_cache.ensure_cached(
+            source,
+            original_name=media.original_name,
+            use_auth=self._should_authenticate_media_source(source),
+        )
+        local_source = str(cached_path)
+        label = self._video_labels_by_source.pop(source, None)
+        if label is None:
+            return
+        self._video_labels_by_source[local_source] = label
+        thumbnail = self._video_thumbnail_cache.get_thumbnail(local_source)
+        try:
+            if thumbnail is not None:
+                self._apply_video_thumbnail(label, thumbnail, label.width(), label.height())
+                return
+            self._video_thumbnail_cache.request_thumbnail(local_source)
+        except RuntimeError:
+            self._video_labels_by_source.pop(local_source, None)
+
+    def _finalize_remote_video_thumbnail(self, source: str, task: asyncio.Task) -> None:
+        self._video_cache_tasks.pop(source, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("Failed to cache remote moment video thumbnail source=%s error=%s", source, exc)
+
+    def _cancel_video_cache_tasks(self) -> None:
+        for task in list(self._video_cache_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._video_cache_tasks.clear()
 
     @staticmethod
     def _apply_scaled_pixmap(label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
@@ -594,7 +663,7 @@ class MomentMediaGrid(QWidget):
             return
         source = self._resolve_media_source(media)
         if media.is_video:
-            self.video_requested.emit(source)
+            self.video_requested.emit(source, media.original_name)
         else:
             self.image_requested.emit(source)
 
@@ -1612,6 +1681,7 @@ class MomentCard(QWidget):
     edit_requested = Signal(str)
     delete_requested = Signal(str)
     comment_delete_requested = Signal(str, str)
+    video_requested = Signal(str, str)
 
     DISPLAY_TEXT_LIMIT = 500
 
@@ -1692,7 +1762,7 @@ class MomentCard(QWidget):
         self.media_grid = MomentMediaGrid([], self)
         self.media_grid.setObjectName("momentMediaGrid")
         self.media_grid.image_requested.connect(self._open_image)
-        self.media_grid.video_requested.connect(self._open_video)
+        self.media_grid.video_requested.connect(self.video_requested.emit)
         layout.addWidget(self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.action_row = QWidget(self)
@@ -1758,7 +1828,7 @@ class MomentCard(QWidget):
             self.media_grid = MomentMediaGrid(self.moment.media, self)
             self.media_grid.setObjectName("momentMediaGrid")
             self.media_grid.image_requested.connect(self._open_image)
-            self.media_grid.video_requested.connect(self._open_video)
+            self.media_grid.video_requested.connect(self.video_requested.emit)
             self.layout().insertWidget(2, self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)
         else:
             self.media_grid = MomentMediaGrid([], self)
@@ -1882,15 +1952,6 @@ class MomentCard(QWidget):
         viewer.show()
         viewer.raise_()
         viewer.activateWindow()
-
-    def _open_video(self, video_source: str) -> None:
-        if not video_source:
-            return
-        if Path(video_source).exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(video_source))
-            return
-        QDesktopServices.openUrl(QUrl(video_source))
-
 
 MOMENTS_PANEL_CONTENT_MARGIN = 12
 MOMENTS_PANEL_CONTENT_SPACING = 12
@@ -2581,6 +2642,8 @@ class DiscoveryInterface(QWidget):
         self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QDialog] = set()
         self._image_dialogs: set[QDialog] = set()
+        self._video_windows: list[VideoWidget] = []
+        self._moment_video_cache = get_moment_video_cache()
         self._initial_load_done = False
         self._teardown_started = False
 
@@ -2711,6 +2774,7 @@ class DiscoveryInterface(QWidget):
             card.edit_requested.connect(self._request_moment_edit)
             card.delete_requested.connect(self._request_moment_delete)
             card.comment_delete_requested.connect(self._request_comment_delete)
+            card.video_requested.connect(self._request_moment_video)
             self.feed_layout.addWidget(card)
             self.feed_layout.addWidget(FluentDivider(self.feed_container, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
             self._cards[moment.id] = card
@@ -2806,6 +2870,55 @@ class DiscoveryInterface(QWidget):
         if not moment_id:
             return
         self._request_moment_detail(moment_id)
+
+    def _request_moment_video(self, source: str, original_name: str = "") -> None:
+        if self._teardown_started:
+            return
+        self._create_ui_task(self._open_moment_video_async(source, original_name), "open moment video")
+
+    async def _open_moment_video_async(self, source: str, original_name: str = "") -> None:
+        normalized_source = str(source or "").strip()
+        if not normalized_source:
+            return
+        try:
+            local_path = await self._moment_video_cache.ensure_cached(
+                normalized_source,
+                original_name=original_name,
+                use_auth=MomentMediaGrid._should_authenticate_media_source(normalized_source),
+            )
+        except APIError as exc:
+            InfoBar.error(
+                tr("discovery.video.open_failed_title", "Video Playback"),
+                str(getattr(exc, "message", "") or exc),
+                parent=self.window(),
+                duration=2600,
+            )
+            return
+        except (OSError, ValueError) as exc:
+            logger.warning("Failed to prepare moment video source=%s error=%s", normalized_source, exc)
+            InfoBar.error(
+                tr("discovery.video.open_failed_title", "Video Playback"),
+                tr("discovery.video.open_failed", "Video is unavailable."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+        self._show_moment_video_player(local_path)
+
+    def _show_moment_video_player(self, local_path: Path) -> None:
+        viewer = VideoWidget()
+        viewer.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        viewer.setWindowFlag(Qt.WindowType.Window, True)
+        viewer.setWindowTitle(tr("discovery.video.player_title", "Video Playback"))
+        viewer.resize(960, 540)
+        viewer.setVideo(QUrl.fromLocalFile(str(local_path.resolve())))
+        viewer.destroyed.connect(lambda *_args, widget=viewer: self._discard_moment_video_window(widget))
+        self._video_windows.append(viewer)
+        viewer.show()
+        viewer.play()
+
+    def _discard_moment_video_window(self, widget: VideoWidget) -> None:
+        self._video_windows = [item for item in self._video_windows if item is not widget]
 
     def _create_moment(self, content: str, media_paths: list | None = None, visibility_scope: str = "public", visibility_user_ids: list | None = None) -> None:
         if self._teardown_started:
