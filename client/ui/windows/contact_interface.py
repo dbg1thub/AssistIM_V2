@@ -55,6 +55,7 @@ from client.core.config_backend import get_config
 from client.core.i18n import tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
+from client.core.ui_diagnostics import flush_ui_events, record_ui_event
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
@@ -1807,7 +1808,104 @@ class ContactInterface(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.record_layout_probe("show_event")
         self.ensure_initial_load()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.record_layout_probe("hide_event")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.record_layout_probe("resize_event")
+
+    def record_layout_probe(self, label: str) -> None:
+        """Record contact-page geometry and flush only when it collapses."""
+        widgets = {
+            "self": self,
+            "splitter": getattr(self, "splitter", None),
+            "left": getattr(self, "left_panel", None),
+            "sidebar": getattr(self, "sidebar_panel", None),
+            "page_stack": getattr(self, "page_stack", None),
+            "detail_stack": getattr(self, "detail_stack", None),
+            "welcome_panel": getattr(self, "welcome_panel", None),
+            "detail_panel": getattr(self, "detail_panel", None),
+        }
+        states = {name: self._widget_probe_state(widget) for name, widget in widgets.items()}
+        splitter_sizes: list[int] | str = ""
+        splitter = getattr(self, "splitter", None)
+        if splitter is not None and is_valid_qt_object(splitter):
+            splitter_sizes = splitter.sizes()
+        current_page = ""
+        if getattr(self, "page_stack", None) is not None and is_valid_qt_object(self.page_stack):
+            current_page = type(self.page_stack.currentWidget()).__name__
+        current_detail = ""
+        if getattr(self, "detail_stack", None) is not None and is_valid_qt_object(self.detail_stack):
+            current_detail = type(self.detail_stack.currentWidget()).__name__
+        record_ui_event(
+            "contact_layout",
+            label=label,
+            current_page=current_page,
+            current_detail=current_detail,
+            splitter_sizes=splitter_sizes,
+            self=states["self"],
+            splitter=states["splitter"],
+            left=states["left"],
+            sidebar=states["sidebar"],
+            page_stack=states["page_stack"],
+            detail_stack=states["detail_stack"],
+            welcome_panel=states["welcome_panel"],
+            detail_panel=states["detail_panel"],
+        )
+        anomaly = self._contact_layout_anomaly(states, splitter_sizes)
+        if anomaly:
+            flush_ui_events(logger, "contact_layout_anomaly", label=label, anomaly=anomaly)
+
+    @staticmethod
+    def _widget_probe_state(widget) -> tuple | str:
+        if widget is None or not is_valid_qt_object(widget):
+            return "missing"
+        try:
+            pos = widget.pos()
+            size = widget.size()
+            return (
+                widget.isVisible(),
+                widget.isHidden(),
+                pos.x(),
+                pos.y(),
+                size.width(),
+                size.height(),
+            )
+        except RuntimeError:
+            return "invalid"
+
+    @staticmethod
+    def _probe_size(state: tuple | str) -> tuple[int, int]:
+        if not isinstance(state, tuple):
+            return (0, 0)
+        return (int(state[4]), int(state[5]))
+
+    @staticmethod
+    def _probe_visible(state: tuple | str) -> bool:
+        return bool(isinstance(state, tuple) and state[0])
+
+    def _contact_layout_anomaly(self, states: dict[str, tuple | str], splitter_sizes: list[int] | str) -> str:
+        if not self._probe_visible(states["self"]):
+            return ""
+        self_width, self_height = self._probe_size(states["self"])
+        if self_width <= 0 or self_height <= 0:
+            return "contact_self_zero_size"
+        for name in ("splitter", "left", "sidebar", "page_stack", "detail_stack"):
+            if states[name] in {"missing", "invalid"}:
+                return f"{name}_{states[name]}"
+            width, height = self._probe_size(states[name])
+            if width <= 0 or height <= 0:
+                return f"{name}_zero_size"
+            if not self._probe_visible(states[name]):
+                return f"{name}_not_visible"
+        if isinstance(splitter_sizes, list) and (sum(splitter_sizes) <= 0 or any(size <= 0 for size in splitter_sizes)):
+            return "splitter_collapsed_sizes"
+        return ""
 
     def ensure_initial_load(self) -> None:
         """Kick off the first contact snapshot load once per runtime."""
@@ -1819,11 +1917,13 @@ class ContactInterface(QWidget):
 
     def _setup_ui(self) -> None:
         splitter = FluentSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter = splitter
         splitter.setObjectName("contactSplitter")
         splitter.setHandleWidth(1)
         splitter.setChildrenCollapsible(False)
 
         sidebar = QWidget(self)
+        self.sidebar_panel = sidebar
         sidebar.setObjectName("ContactSidebarCard")
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -1872,6 +1972,7 @@ class ContactInterface(QWidget):
         sidebar_layout.addWidget(self.page_stack, 1)
 
         left = QWidget(self)
+        self.left_panel = left
         left.setMinimumWidth(260)
         left.setMaximumWidth(560)
         left_layout = QVBoxLayout(left)

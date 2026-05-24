@@ -28,6 +28,7 @@ from client.core import logging
 from client.core.config import cfg
 from client.core.i18n import tr
 from client.core.logging import setup_logging
+from client.core.ui_diagnostics import flush_ui_events, record_ui_event
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.events.event_bus import get_event_bus
@@ -194,6 +195,7 @@ class MainWindow(FluentWindow):
         self._subscribe_to_events()
         if hasattr(self, "stackedWidget"):
             self.stackedWidget.currentChanged.connect(self._on_sub_interface_changed)
+            self._connect_stacked_animation_diagnostics()
         self._init_system_tray()
         self.destroyed.connect(self._on_destroyed)
 
@@ -245,6 +247,7 @@ class MainWindow(FluentWindow):
             current_widget is self.chat_interface,
             getattr(self.chat_interface, "_current_session_id", None),
         )
+        self._record_stacked_widget_probe("current_changed", target=current_widget)
         if current_widget is not self.chat_interface:
             self.chat_interface.close_transient_panels()
         self._sync_chat_session_activity()
@@ -257,11 +260,135 @@ class MainWindow(FluentWindow):
             type(self.stackedWidget.currentWidget()).__name__ if hasattr(self, "stackedWidget") and self.stackedWidget.currentWidget() is not None else "",
             getattr(self.chat_interface, "_current_session_id", None),
         )
+        self._record_stacked_widget_probe("before_switch", target=interface)
         if interface is not self.chat_interface:
             self.chat_interface.close_transient_panels()
         result = super().switchTo(interface)
+        self._record_stacked_widget_probe("after_switch", target=interface)
+        self._schedule_post_switch_probes(interface)
         self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
         return result
+
+    def _connect_stacked_animation_diagnostics(self) -> None:
+        """Attach diagnostics to qfluent top-level stack animation signals."""
+        view = getattr(getattr(self, "stackedWidget", None), "view", None)
+        if view is None:
+            return
+        ani_start = getattr(view, "aniStart", None)
+        ani_finished = getattr(view, "aniFinished", None)
+        if ani_start is not None:
+            ani_start.connect(lambda: self._on_stacked_animation_diagnostic("ani_start"))
+        if ani_finished is not None:
+            ani_finished.connect(lambda: self._on_stacked_animation_diagnostic("ani_finished"))
+
+    def _on_stacked_animation_diagnostic(self, label: str) -> None:
+        """Record stack and contact geometry when the top-level animation changes state."""
+        self._record_stacked_widget_probe(label, target=getattr(self, "contact_interface", None))
+        self._record_interface_geometry_probe(label, target=getattr(self, "contact_interface", None))
+
+    def _schedule_post_switch_probes(self, target) -> None:
+        """Sample widget geometry after a switch without writing logs on the hot path."""
+        for delay in (0, 350, 1000):
+            self._schedule_ui_single_shot(
+                delay,
+                lambda delay=delay, target=target: self._record_interface_geometry_probe(
+                    f"post_switch_{delay}ms",
+                    target=target,
+                ),
+            )
+
+    def _record_interface_geometry_probe(self, label: str, *, target=None) -> None:
+        """Record high-level page geometry and delegate to contact page probes when available."""
+        current_widget = self.stackedWidget.currentWidget() if hasattr(self, "stackedWidget") else None
+        target_widget = target
+        record_ui_event(
+            "main_window_interface",
+            label=label,
+            current=type(current_widget).__name__ if current_widget is not None else "",
+            current_pos=self._widget_pos_tuple(current_widget),
+            current_size=self._widget_size_tuple(current_widget),
+            current_visible=current_widget.isVisible() if current_widget is not None else "",
+            target=type(target_widget).__name__ if target_widget is not None else "",
+            target_pos=self._widget_pos_tuple(target_widget),
+            target_size=self._widget_size_tuple(target_widget),
+            target_visible=target_widget.isVisible() if target_widget is not None else "",
+            stack_size=self._widget_size_tuple(getattr(self, "stackedWidget", None)),
+        )
+        contact = getattr(self, "contact_interface", None)
+        if contact is not None and hasattr(contact, "record_layout_probe"):
+            contact.record_layout_probe(f"main_window_{label}")
+
+    def _record_stacked_widget_probe(self, label: str, *, target=None) -> None:
+        """Record top-level qfluent stack state without logging on every navigation event."""
+        stacked = getattr(self, "stackedWidget", None)
+        if stacked is None:
+            record_ui_event("main_window_stack", label=label, state="missing")
+            return
+
+        current_widget = stacked.currentWidget() if hasattr(stacked, "currentWidget") else None
+        current_index = stacked.currentIndex() if hasattr(stacked, "currentIndex") else None
+        target_index = stacked.indexOf(target) if target is not None and hasattr(stacked, "indexOf") else None
+        view = getattr(stacked, "view", None)
+        animation = getattr(view, "_ani", None) if view is not None else None
+        animation_state = ""
+        if animation is not None:
+            try:
+                animation_state = str(animation.state())
+            except RuntimeError:
+                animation_state = "invalid"
+        animation_enabled = ""
+        if hasattr(stacked, "isAnimationEnabled"):
+            try:
+                animation_enabled = stacked.isAnimationEnabled()
+            except RuntimeError:
+                animation_enabled = "invalid"
+        next_index = getattr(view, "_nextIndex", None) if view is not None else None
+        record_ui_event(
+            "main_window_stack",
+            label=label,
+            current=type(current_widget).__name__ if current_widget is not None else "",
+            target=type(target).__name__ if target is not None else "",
+            current_index=current_index,
+            target_index=target_index,
+            animation_enabled=animation_enabled,
+            animation_state=animation_state,
+            next_index=next_index,
+            visible=self.isVisible(),
+            target_visible=target.isVisible() if target is not None else "",
+            current_pos=self._widget_pos_tuple(current_widget),
+            current_size=self._widget_size_tuple(current_widget),
+            target_pos=self._widget_pos_tuple(target),
+            target_size=self._widget_size_tuple(target),
+        )
+        if label == "before_switch" and "Running" in animation_state:
+            flush_ui_events(
+                logger,
+                "top_level_switch_while_animation_running",
+                current=type(current_widget).__name__ if current_widget is not None else "",
+                target=type(target).__name__ if target is not None else "",
+                current_index=current_index,
+                target_index=target_index,
+            )
+
+    @staticmethod
+    def _widget_size_tuple(widget) -> tuple[int, int] | str:
+        if widget is None:
+            return ""
+        try:
+            size = widget.size()
+            return (size.width(), size.height())
+        except RuntimeError:
+            return "invalid"
+
+    @staticmethod
+    def _widget_pos_tuple(widget) -> tuple[int, int] | str:
+        if widget is None:
+            return ""
+        try:
+            pos = widget.pos()
+            return (pos.x(), pos.y())
+        except RuntimeError:
+            return "invalid"
 
     def changeEvent(self, event) -> None:
         """Keep chat read-state visibility in sync with focus and window-state changes."""

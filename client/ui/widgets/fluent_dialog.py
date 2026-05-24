@@ -83,8 +83,10 @@ class FluentDialogWindowButton(TitleBarButton):
         pen.setCosmetic(True)
         painter.setPen(pen)
         if self._button_type == "minimize":
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             painter.drawLine(18, 16, 28, 16)
         elif self._button_type == "maximize":
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             r = self.devicePixelRatioF()
             painter.scale(1 / r, 1 / r)
             if self._is_maximized:

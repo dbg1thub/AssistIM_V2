@@ -7,6 +7,7 @@ import sys
 import asyncio
 import argparse
 import os
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from client.core.config_backend import UI_CONFIG_PATH, get_config
 from client.core.config import cfg
 from client.core.i18n import current_locale, initialize_i18n, tr
 from client.core.logging import setup_logging
+from client.core.ui_diagnostics import flush_ui_events, record_ui_event
 from client.storage.database import get_database, peek_database
 from client.network.http_client import get_http_client, peek_http_client
 from client.network.websocket_client import get_websocket_client, peek_websocket_client
@@ -59,6 +61,7 @@ EXIT_CODE_OK = 0
 EXIT_CODE_SINGLE_INSTANCE = 1
 EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED = 2
 EXIT_CODE_STARTUP_RUNTIME_FAILED = 3
+_qt_message_handler_installed = False
 FORMAL_FORCE_LOGOUT_REASONS = {
     "session_replaced",
     "logout",
@@ -66,6 +69,72 @@ FORMAL_FORCE_LOGOUT_REASONS = {
     "admin_disable_user",
     "admin_force_logout",
 }
+
+
+def _install_qt_message_diagnostics() -> None:
+    """Route Qt warnings into app logs and attach Python stack for timer-thread diagnostics."""
+    global _qt_message_handler_installed
+    if _qt_message_handler_installed:
+        return
+
+    qt_logger = logging.get_logger("qt")
+    try:
+        from PySide6 import QtCore
+    except ImportError:
+        return
+    install_message_handler = getattr(QtCore, "qInstallMessageHandler", None)
+    if not callable(install_message_handler):
+        return
+
+    def _handler(mode, context, message) -> None:
+        text = str(message)
+        mode_name = mode.name if hasattr(mode, "name") else str(mode)
+        if "Debug" in mode_name:
+            level = 10
+        elif "Info" in mode_name:
+            level = 20
+        elif "Warning" in mode_name:
+            level = 30
+        else:
+            level = 40
+
+        category = getattr(context, "category", "") or ""
+        file_name = getattr(context, "file", "") or ""
+        line = getattr(context, "line", 0) or 0
+        function = getattr(context, "function", "") or ""
+        if "QBasicTimer::stop" in text:
+            stack = "".join(traceback.format_stack(limit=28)).rstrip()
+            record_ui_event(
+                "qt_warning",
+                mode=mode_name,
+                category=category,
+                file=file_name,
+                line=line,
+                function=function,
+                message=text,
+            )
+            flush_ui_events(
+                qt_logger,
+                "qt_basic_timer_stop",
+                mode=mode_name,
+                message=text,
+                stack=stack,
+            )
+            return
+        if level >= 30:
+            qt_logger.log(
+                level,
+                "[qt] type=%s category=%s file=%s line=%s function=%s message=%s",
+                mode_name,
+                category,
+                file_name,
+                line,
+                function,
+                text,
+            )
+
+    install_message_handler(_handler)
+    _qt_message_handler_installed = True
 
 
 def _peek_discovery_controller():
@@ -1442,6 +1511,7 @@ def main() -> int:
     args, qt_unknown_args = _parse_runtime_args(sys.argv)
     profile = _configure_runtime_profile(args.profile) if args.profile else ""
     setup_logging()
+    _install_qt_message_diagnostics()
     logger.info("Starting AssistIM...")
 
     _apply_startup_dpi_scale()

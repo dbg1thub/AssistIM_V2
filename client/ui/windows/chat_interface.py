@@ -48,6 +48,7 @@ from client.core.file_text_extraction import (
 )
 from client.core.i18n import current_language_code, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY, should_auto_translate_text
+from client.core.ui_diagnostics import record_ui_event
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
 from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
@@ -1242,6 +1243,32 @@ class ChatInterface(QWidget):
         """Return whether the debounce timer still exists."""
         timer = getattr(self, "_reply_suggestion_timer", None)
         return timer is not None and is_valid_qt_object(timer)
+
+    def _record_reply_suggestion_timer_probe(self, label: str) -> None:
+        """Record timer state for navigation-hide diagnostics without logging on the hot path."""
+        timer = getattr(self, "_reply_suggestion_timer", None)
+        valid = timer is not None and is_valid_qt_object(timer)
+        active = ""
+        interval = ""
+        remaining = ""
+        if valid:
+            try:
+                active = timer.isActive()
+                interval = timer.interval()
+                remaining = timer.remainingTime()
+            except RuntimeError:
+                valid = False
+        record_ui_event(
+            "reply_suggestion_timer",
+            label=label,
+            valid=valid,
+            active=active,
+            interval=interval,
+            remaining=remaining,
+            current_session_id=self._current_session_id,
+            visibility_active=self._session_visibility_active,
+            session_active=self._current_session_active,
+        )
 
     def _safe_clear_reply_suggestion_feedback(self) -> None:
         """Clear reply chips and loading text only while the composer still exists."""
@@ -5727,6 +5754,13 @@ class ChatInterface(QWidget):
             self._current_session_id,
             self._current_session_active,
         )
+        record_ui_event(
+            "chat_visibility",
+            old=self._session_visibility_active,
+            new=normalized,
+            current_session_id=self._current_session_id,
+            current_session_active=self._current_session_active,
+        )
         if self._session_visibility_active and not normalized and schedule_idle_summary:
             self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="chat_hidden")
         self._session_visibility_active = normalized
@@ -5738,6 +5772,12 @@ class ChatInterface(QWidget):
         if not normalized_session_id or self._teardown_started or self._is_ephemeral_direct_session_id(normalized_session_id):
             return
         manager = get_conversation_summary_manager()
+        record_ui_event(
+            "chat_summary_idle_request",
+            session_id=normalized_session_id,
+            reason=reason,
+            delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS,
+        )
         manager.request_idle_refresh(
             normalized_session_id,
             reason=reason,
@@ -5781,10 +5821,19 @@ class ChatInterface(QWidget):
             is_active,
             current_session_id,
         )
+        record_ui_event(
+            "chat_current_session_active",
+            requested=active,
+            computed=is_active,
+            is_ephemeral=is_ephemeral,
+            current_session_id=current_session_id,
+        )
         if is_ephemeral:
             if not is_active:
                 if self._is_reply_suggestion_timer_alive():
+                    self._record_reply_suggestion_timer_probe("ephemeral_before_stop")
                     self._reply_suggestion_timer.stop()
+                    self._record_reply_suggestion_timer_probe("ephemeral_after_stop")
                 self._reply_suggestion_pending_context = None
                 self._reply_suggestion_rerun_context = None
             return
@@ -5794,7 +5843,9 @@ class ChatInterface(QWidget):
         )
         if not is_active:
             if self._is_reply_suggestion_timer_alive():
+                self._record_reply_suggestion_timer_probe("session_inactive_before_stop")
                 self._reply_suggestion_timer.stop()
+                self._record_reply_suggestion_timer_probe("session_inactive_after_stop")
             self._reply_suggestion_pending_context = None
             self._reply_suggestion_rerun_context = None
         if is_active:

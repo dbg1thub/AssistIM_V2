@@ -16,6 +16,7 @@ from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTe
 from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
+from client.core.ui_diagnostics import record_ui_event
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.events.event_bus import EventBus, get_event_bus
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
@@ -805,6 +806,14 @@ class ConversationSummaryManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id or self._closing or self._is_task_manager_closed():
             return False
+        record_ui_event(
+            "conversation_summary_idle_request",
+            session_id=normalized_session_id,
+            reason=reason,
+            delay_seconds=delay_seconds,
+            closing=self._closing,
+            task_manager_closed=self._is_task_manager_closed(),
+        )
 
         async def runner() -> None:
             await asyncio.sleep(0)

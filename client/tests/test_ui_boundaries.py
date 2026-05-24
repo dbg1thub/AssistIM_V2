@@ -986,6 +986,7 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'class FluentDialogWindowButton(TitleBarButton):' in fluent_dialog
     assert 'QSvgRenderer(self._close_svg_dom.toByteArray())' in fluent_dialog
     assert 'painter.drawLine(18, 16, 28, 16)' in fluent_dialog
+    assert 'painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)' in fluent_dialog
     assert 'r = self.devicePixelRatioF()' in fluent_dialog
     assert 'painter.scale(1 / r, 1 / r)' in fluent_dialog
     assert 'painter.drawRect(int(18 * r), int(11 * r), int(10 * r), int(10 * r))' in fluent_dialog
