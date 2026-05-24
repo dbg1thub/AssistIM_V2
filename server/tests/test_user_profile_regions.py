@@ -15,8 +15,12 @@ def test_region_catalog_localizes_subdivision_names_for_supported_locales() -> N
     catalog = RegionCatalog()
 
     zh = catalog.regions(locale="zh-CN")
+    zh_antigua = next(item for item in zh["countries"] if item["code"] == "AG")
+    zh_austria = next(item for item in zh["countries"] if item["code"] == "AT")
     zh_china = next(item for item in zh["countries"] if item["code"] == "CN")
     zh_korea = next(item for item in zh["countries"] if item["code"] == "KR")
+    assert next(item for item in zh_antigua["subdivisions"] if item["code"] == "AG-03")["name"] == "圣乔治区"
+    assert next(item for item in zh_austria["subdivisions"] if item["code"] == "AT-3")["name"] == "下奥地利州"
     assert next(item for item in zh_china["subdivisions"] if item["code"] == "CN-BJ")["name"] == "北京市"
     assert next(item for item in zh_korea["subdivisions"] if item["code"] == "KR-26")["name"] == "釜山"
 

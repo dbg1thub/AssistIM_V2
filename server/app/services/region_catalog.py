@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from babel import Locale, UnknownLocaleError
+from opencc import OpenCC
 import pycountry
 
 from app.core.errors import AppError, ErrorCode
@@ -242,11 +243,22 @@ class RegionCatalog:
             if not isinstance(names, dict):
                 continue
             result[str(locale)] = {
-                str(code).strip().lower(): str(name).strip()
+                str(code).strip().lower(): cls._normalize_subdivision_resource_name(str(locale), str(name).strip())
                 for code, name in names.items()
                 if str(code).strip() and str(name).strip()
             }
         return result
+
+    @classmethod
+    def _normalize_subdivision_resource_name(cls, locale: str, name: str) -> str:
+        if str(locale) != "zh-CN":
+            return name
+        return cls._zh_hans_converter().convert(name)
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _zh_hans_converter() -> OpenCC:
+        return OpenCC("t2s")
 
     def _match_country_name(self, value: str) -> str | None:
         text = str(value or "").strip()
