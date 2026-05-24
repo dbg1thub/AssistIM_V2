@@ -2,6 +2,26 @@ import json
 from pathlib import Path
 
 
+def test_static_card_frame_is_non_interactive_card_container() -> None:
+    static_card = Path('client/ui/widgets/static_card_frame.py').read_text(encoding='utf-8')
+
+    assert 'class StaticCardFrame(QFrame):' in static_card
+    assert 'CardWidget' not in static_card
+    assert 'BackgroundAnimationWidget' not in static_card
+    assert 'QPropertyAnimation' not in static_card
+    assert 'clicked = Signal' not in static_card
+    assert 'setClickEnabled' not in static_card
+    assert 'mousePressEvent' not in static_card
+    assert 'mouseReleaseEvent' not in static_card
+    assert 'enterEvent' not in static_card
+    assert 'leaveEvent' not in static_card
+    assert 'def _normalBackgroundColor(self) -> QColor:' in static_card
+    assert 'QColor(255, 255, 255, 13 if isDarkTheme() else 170)' in static_card
+    assert 'def paintEvent(self, event) -> None:' in static_card
+    assert 'painter.drawRoundedRect(rect, radius, radius)' in static_card
+    assert 'qconfig.themeChanged.connect(self.update)' in static_card
+
+
 def test_ui_does_not_emit_session_updated_events_directly() -> None:
     session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
