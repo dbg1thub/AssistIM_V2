@@ -40,7 +40,7 @@ from qfluentwidgets.components.material import AcrylicFlyout, AcrylicFlyoutViewB
 from client.core import logging
 from client.core.avatar_rendering import apply_avatar_widget_image
 from client.core.avatar_utils import profile_avatar_seed
-from client.core.i18n import tr
+from client.core.i18n import current_language_code, tr
 from client.core.logging import setup_logging
 from client.core.profile_fields import (
     normalize_profile_choice,
@@ -48,6 +48,7 @@ from client.core.profile_fields import (
     profile_gender_options,
 )
 from client.ui.controllers.auth_controller import get_auth_controller
+from client.services.user_service import get_user_service
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
 
@@ -56,53 +57,6 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_REGION_OPTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("", ("",)),
-    (
-        "中国大陆",
-        (
-            "",
-            "北京",
-            "上海",
-            "天津",
-            "重庆",
-            "河北",
-            "山西",
-            "辽宁",
-            "吉林",
-            "黑龙江",
-            "江苏",
-            "浙江",
-            "安徽",
-            "福建",
-            "江西",
-            "山东",
-            "河南",
-            "湖北",
-            "湖南",
-            "广东",
-            "海南",
-            "四川",
-            "贵州",
-            "云南",
-            "陕西",
-            "甘肃",
-            "青海",
-            "内蒙古",
-            "广西",
-            "西藏",
-            "宁夏",
-            "新疆",
-        ),
-    ),
-    ("中国香港", ("",)),
-    ("中国澳门", ("",)),
-    ("中国台湾", ("",)),
-    ("韩国", ("", "首尔", "釜山", "大邱", "仁川", "光州", "大田", "蔚山", "世宗", "京畿道", "江原道", "忠清北道", "忠清南道", "全罗北道", "全罗南道", "庆尚北道", "庆尚南道", "济州")),
-    ("美国", ("",)),
-    ("日本", ("",)),
-    ("其他", ("",)),
-)
 
 
 def _avatar_initials(name: str) -> str:
@@ -808,7 +762,12 @@ class ProfileEditDialog(FluentDialog):
         super().__init__(parent, title=tr("profile.edit.window_title", "Edit Profile"))
         self._user = dict(user or {})
         self._auth_controller = auth_controller or get_auth_controller()
+        self._user_service = get_user_service()
         self._original_email = str(self._user.get("email", "") or "").strip().lower()
+        self._original_region_country_code = str(self._user.get("region_country_code", "") or "").strip().upper()
+        self._original_region_subdivision_code = str(self._user.get("region_subdivision_code", "") or "").strip().upper()
+        self._region_countries: list[dict[str, object]] = []
+        self._region_catalog_task: asyncio.Task | None = None
         self._avatar_file_path = ""
         self._reset_avatar_requested = False
         self._email_code_task: asyncio.Task | None = None
@@ -882,7 +841,7 @@ class ProfileEditDialog(FluentDialog):
 
         self.region_country_combo = ComboBox(self)
         self.region_area_combo = ComboBox(self)
-        self._populate_region_country_combo(str(self._user.get("region", "") or ""))
+        self._populate_region_country_combo()
         self.region_country_combo.currentIndexChanged.connect(lambda _index: self._sync_region_area_options())
 
         self.email_edit = LineEdit(self)
@@ -934,8 +893,10 @@ class ProfileEditDialog(FluentDialog):
         layout.addStretch(1)
         layout.addLayout(button_row)
         self._sync_email_code_visibility()
+        self._set_region_catalog_task(self._load_region_catalog_async())
 
     def closeEvent(self, event) -> None:
+        self._cancel_region_catalog_task()
         self._cancel_email_code_task()
         super().closeEvent(event)
 
@@ -944,7 +905,8 @@ class ProfileEditDialog(FluentDialog):
         return {
             "nickname": self.nickname_edit.text().strip(),
             "signature": self.signature_edit.text().strip(),
-            "region": self._region_value(),
+            "region_country_code": self._region_country_code(),
+            "region_subdivision_code": self._region_subdivision_code(),
             "email": self.email_edit.text().strip(),
             "email_code": self.email_code_edit.text().strip() if self._email_changed() and self.email_edit.text().strip() else None,
             "gender": str(self.gender_combo.currentData() or ""),
@@ -983,53 +945,113 @@ class ProfileEditDialog(FluentDialog):
         row_layout.addWidget(self.region_area_combo, 1)
         return row
 
-    def _populate_region_country_combo(self, region: str) -> None:
-        country, area = self._split_region_value(region)
-        known_countries = {item[0] for item in _REGION_OPTIONS}
-        for value, _areas in _REGION_OPTIONS:
-            label = value or tr("profile.edit.region.empty", "Not set")
-            self.region_country_combo.addItem(label, userData=value)
-        if country and country not in known_countries:
-            self.region_country_combo.addItem(country, userData=country)
-        self._set_combo_value(self.region_country_combo, country)
-        self._sync_region_area_options(area)
+    def _populate_region_country_combo(self) -> None:
+        selected_country = self._region_country_code() or self._original_region_country_code
+        selected_subdivision = self._region_subdivision_code() or self._original_region_subdivision_code
+        self.region_country_combo.clear()
+        self.region_country_combo.addItem(tr("profile.edit.region.empty", "Not set"), userData="")
+        known_codes: set[str] = {""}
+        for country in self._region_countries:
+            code = str(country.get("code", "") or "").strip().upper()
+            if not code:
+                continue
+            known_codes.add(code)
+            label = str(country.get("name", "") or code)
+            self.region_country_combo.addItem(label, userData=code)
+        if selected_country and selected_country not in known_codes:
+            self.region_country_combo.addItem(selected_country, userData=selected_country)
+        self._set_combo_value(self.region_country_combo, selected_country)
+        self._sync_region_area_options(selected_subdivision)
 
     def _sync_region_area_options(self, selected_area: str = "") -> None:
-        country = str(self.region_country_combo.currentData() or "")
-        previous_area = selected_area or str(self.region_area_combo.currentData() or "")
-        areas = next((item_areas for item_country, item_areas in _REGION_OPTIONS if item_country == country), ("",))
-        known_areas = set(areas)
+        country = self._region_country_code()
+        previous_area = str(selected_area or self.region_area_combo.currentData() or "").strip().upper()
+        subdivisions = self._subdivisions_for_country(country)
+        known_areas = {str(item.get("code", "") or "").strip().upper() for item in subdivisions}
         self.region_area_combo.clear()
-        for value in areas:
-            label = value or tr("profile.edit.region.area_empty", "Not set")
-            self.region_area_combo.addItem(label, userData=value)
+        self.region_area_combo.addItem(tr("profile.edit.region.area_empty", "Not set"), userData="")
+        for item in subdivisions:
+            code = str(item.get("code", "") or "").strip().upper()
+            if not code:
+                continue
+            label = str(item.get("name", "") or code)
+            self.region_area_combo.addItem(label, userData=code)
         if previous_area and previous_area not in known_areas:
             self.region_area_combo.addItem(previous_area, userData=previous_area)
         self._set_combo_value(self.region_area_combo, previous_area)
 
-    @staticmethod
-    def _split_region_value(region: str) -> tuple[str, str]:
-        text = str(region or "").strip()
-        if not text:
-            return "", ""
-        for country, areas in _REGION_OPTIONS:
-            if not country:
-                continue
-            if text == country:
-                return country, ""
-            prefix = f"{country} "
-            if text.startswith(prefix):
-                return country, text[len(prefix) :].strip()
-            if text in areas:
-                return country, text
-        return text, ""
+    def _subdivisions_for_country(self, country_code: str) -> list[dict[str, object]]:
+        for country in self._region_countries:
+            if str(country.get("code", "") or "").strip().upper() == country_code:
+                subdivisions = country.get("subdivisions") or []
+                return [dict(item) for item in subdivisions if isinstance(item, dict)]
+        return []
 
-    def _region_value(self) -> str:
-        country = str(self.region_country_combo.currentData() or "").strip()
-        area = str(self.region_area_combo.currentData() or "").strip()
-        if country and area:
-            return f"{country} {area}"
-        return country or area
+    def _region_country_code(self) -> str:
+        return str(self.region_country_combo.currentData() or "").strip().upper()
+
+    def _region_subdivision_code(self) -> str:
+        return str(self.region_area_combo.currentData() or "").strip().upper()
+
+    def _set_region_catalog_task(self, coro) -> None:
+        self._cancel_region_catalog_task()
+        task = asyncio.create_task(coro)
+        self._region_catalog_task = task
+        task.add_done_callback(self._clear_region_catalog_task)
+
+    def _clear_region_catalog_task(self, task: asyncio.Task) -> None:
+        if self._region_catalog_task is task:
+            self._region_catalog_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Profile region catalog load failed")
+            InfoBar.error(
+                tr("profile.edit.title", "Edit Profile"),
+                tr("profile.edit.region.load_failed", "Unable to load the region catalog right now."),
+                parent=self,
+                duration=2400,
+            )
+
+    def _cancel_region_catalog_task(self) -> None:
+        if self._region_catalog_task is not None and not self._region_catalog_task.done():
+            self._region_catalog_task.cancel()
+        self._region_catalog_task = None
+
+    async def _load_region_catalog_async(self) -> None:
+        catalog = await self._user_service.fetch_profile_regions(current_language_code())
+        self._apply_region_catalog(catalog)
+
+    def _apply_region_catalog(self, catalog: dict[str, object]) -> None:
+        countries = catalog.get("countries")
+        if not isinstance(countries, list):
+            raise ValueError("region catalog must include countries")
+        normalized: list[dict[str, object]] = []
+        for country in countries:
+            if not isinstance(country, dict):
+                continue
+            code = str(country.get("code", "") or "").strip().upper()
+            name = str(country.get("name", "") or code).strip()
+            if not code:
+                continue
+            subdivisions: list[dict[str, object]] = []
+            for item in country.get("subdivisions") or []:
+                if not isinstance(item, dict):
+                    continue
+                subdivision_code = str(item.get("code", "") or "").strip().upper()
+                if not subdivision_code:
+                    continue
+                subdivisions.append(
+                    {
+                        "code": subdivision_code,
+                        "name": str(item.get("name", "") or subdivision_code).strip(),
+                    }
+                )
+            normalized.append({"code": code, "name": name or code, "subdivisions": subdivisions})
+        self._region_countries = normalized
+        self._populate_region_country_combo()
 
     def _choose_avatar(self) -> None:
         file_path, _selected_filter = QFileDialog.getOpenFileName(
@@ -1466,7 +1488,8 @@ class UserProfileCoordinator(QWidget):
             update_result = await self._auth_controller.update_profile(
                 nickname=str(payload.get("nickname", "") or "").strip(),
                 signature=str(payload.get("signature", "") or "").strip(),
-                region=str(payload.get("region", "") or "").strip(),
+                region_country_code=str(payload.get("region_country_code", "") or "").strip(),
+                region_subdivision_code=str(payload.get("region_subdivision_code", "") or "").strip(),
                 email=str(payload.get("email", "") or "").strip(),
                 email_code=str(payload.get("email_code", "") or "").strip() or None,
                 gender=normalize_profile_gender(payload.get("gender")),

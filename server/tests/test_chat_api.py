@@ -96,7 +96,8 @@ def test_friend_request_private_session_and_message_flow(
             "email_code": email_code,
             "phone": "+82-10-0000-0002",
             "birthday": "1992-08-04",
-            "region": "Busan",
+            "region_country_code": "KR",
+            "region_subdivision_code": "KR-26",
             "signature": "Backend and integration tests.",
             "gender": "male",
             "status": "busy",
@@ -117,7 +118,9 @@ def test_friend_request_private_session_and_message_flow(
     assert "email" not in friend_payload[0]["user"]
     assert "phone" not in friend_payload[0]["user"]
     assert "birthday" not in friend_payload[0]["user"]
-    assert friend_payload[0]["user"]["region"] == "Busan"
+    assert friend_payload[0]["user"]["region_country_code"] == "KR"
+    assert friend_payload[0]["user"]["region_subdivision_code"] == "KR-26"
+    assert friend_payload[0]["user"]["region"] == friend_payload[0]["user"]["region_display"]
     assert friend_payload[0]["user"]["signature"] == "Backend and integration tests."
     assert "status" not in friend_payload[0]["user"]
 

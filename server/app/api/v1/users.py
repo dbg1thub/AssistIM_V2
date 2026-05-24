@@ -13,6 +13,7 @@ from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
 from app.schemas.user import UserUpdateRequest
 from app.services.avatar_service import AvatarService
+from app.services.region_catalog import RegionCatalog
 from app.services.user_service import UserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -72,6 +73,14 @@ def list_users(
     db: Session = Depends(get_db),
 ) -> dict:
     return success_response(UserService(db).list_users(page=page, size=size))
+
+
+@router.get("/profile/regions")
+def list_profile_regions(
+    locale: str = Query(default=RegionCatalog.DEFAULT_LOCALE),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return success_response(RegionCatalog().regions(locale=locale))
 
 
 @router.get("/{user_id}")

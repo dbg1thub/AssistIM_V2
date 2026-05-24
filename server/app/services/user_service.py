@@ -13,10 +13,19 @@ from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
 from app.services.email_verification_service import EmailVerificationService, normalize_email_address
+from app.services.region_catalog import RegionCatalog
 
 
 class UserService:
-    _NULLABLE_FIELDS = {"email", "phone", "birthday", "region", "signature", "gender"}
+    _NULLABLE_FIELDS = {
+        "email",
+        "phone",
+        "birthday",
+        "region_country_code",
+        "region_subdivision_code",
+        "signature",
+        "gender",
+    }
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -24,6 +33,7 @@ class UserService:
         self.sessions = SessionRepository(db)
         self.messages = MessageRepository(db)
         self.avatars = AvatarService(db)
+        self.regions = RegionCatalog()
 
     def list_users(self, *, page: int = 1, size: int = 20) -> dict:
         normalized_page = max(1, page)
@@ -59,8 +69,25 @@ class UserService:
                 normalized_fields[key] = None
             elif key == "email" and value is not None:
                 normalized_fields[key] = normalize_email_address(str(value))
+            elif key == "region_country_code":
+                normalized_fields[key] = self.regions.normalize_country_code(value)
+            elif key == "region_subdivision_code":
+                normalized_fields[key] = self.regions.normalize_subdivision_code(value)
             else:
                 normalized_fields[key] = value
+        if "region_country_code" in normalized_fields or "region_subdivision_code" in normalized_fields:
+            next_country = normalized_fields.get("region_country_code", getattr(current_user, "region_country_code", None))
+            next_subdivision = normalized_fields.get(
+                "region_subdivision_code",
+                getattr(current_user, "region_subdivision_code", None),
+            )
+            country, subdivision = self.regions.validate_region_codes(
+                country_code=next_country,
+                subdivision_code=next_subdivision,
+            )
+            normalized_fields["region_country_code"] = country
+            normalized_fields["region_subdivision_code"] = subdivision
+            normalized_fields["region"] = None
         if "email" in normalized_fields:
             next_email = normalized_fields["email"]
             if next_email:
@@ -142,6 +169,12 @@ class UserService:
     def serialize_public_user(self, user: User) -> dict[str, object]:
         nickname = str(user.nickname or "")
         username = str(user.username or "")
+        region_country_code = self.regions.normalize_country_code(getattr(user, "region_country_code", None)) or None
+        region_subdivision_code = self.regions.normalize_subdivision_code(getattr(user, "region_subdivision_code", None)) or None
+        region_display = self.regions.display_region(
+            country_code=region_country_code,
+            subdivision_code=region_subdivision_code,
+        )
         return {
             "id": user.id,
             "username": username,
@@ -150,7 +183,10 @@ class UserService:
             "avatar": self.avatars.resolve_user_avatar_url(user),
             "avatar_kind": str(getattr(user, "avatar_kind", "generated") or "generated"),
             "gender": str(user.gender or ""),
-            "region": getattr(user, "region", None),
+            "region": region_display or None,
+            "region_display": region_display,
+            "region_country_code": region_country_code,
+            "region_subdivision_code": region_subdivision_code,
             "signature": getattr(user, "signature", None),
         }
 
@@ -162,7 +198,10 @@ class UserService:
             "email_verified": bool(getattr(user, "email_verified", False)),
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,
-            "region": user.region,
+            "region": summary["region"],
+            "region_display": summary["region_display"],
+            "region_country_code": summary["region_country_code"],
+            "region_subdivision_code": summary["region_subdivision_code"],
             "signature": user.signature,
             "gender": user.gender,
             "status": user.status,

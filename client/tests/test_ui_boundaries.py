@@ -1090,6 +1090,27 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'Friend timeline view will open here later.' not in contact_interface
 
 
+def test_profile_edit_region_uses_backend_catalog_codes() -> None:
+    profile_flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    save_block = profile_flyout.split('async def _save_profile_async', 1)[1].split('def _emit_profile_changed', 1)[0]
+    auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
+    user_service = Path('client/services/user_service.py').read_text(encoding='utf-8')
+
+    assert '_REGION_OPTIONS' not in profile_flyout
+    assert 'async def fetch_profile_regions(' in user_service
+    assert 'await self._user_service.fetch_profile_regions(' in profile_flyout
+    assert '"region_country_code": self._region_country_code()' in profile_flyout
+    assert '"region_subdivision_code": self._region_subdivision_code()' in profile_flyout
+    assert '"region": self._region_value()' not in profile_flyout
+    assert 'region_country_code=str(payload.get("region_country_code", "") or "").strip()' in save_block
+    assert 'region_subdivision_code=str(payload.get("region_subdivision_code", "") or "").strip()' in save_block
+    assert 'region_country_code: str | None = None' in auth_controller
+    assert 'region_subdivision_code: str | None = None' in auth_controller
+    assert '"region_country_code": region_country_code' in auth_controller
+    assert '"region_subdivision_code": region_subdivision_code' in auth_controller
+    assert '"region": region' not in auth_controller
+
+
 def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')

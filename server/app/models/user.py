@@ -37,6 +37,8 @@ class User(IdMixin, TimestampMixin, Base):
     phone: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     birthday: Mapped[date | None] = mapped_column(Date(), nullable=True)
     region: Mapped[str | None] = mapped_column(String(length=128), nullable=True)
+    region_country_code: Mapped[str | None] = mapped_column(String(length=2), nullable=True)
+    region_subdivision_code: Mapped[str | None] = mapped_column(String(length=16), nullable=True)
     signature: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     auth_session_version: Mapped[int] = mapped_column(default=0)

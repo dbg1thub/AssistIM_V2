@@ -42,6 +42,14 @@ class UserService:
         payload = await self._http.get(f"/users/{user_id}")
         return dict(payload or {})
 
+    async def fetch_profile_regions(self, locale: str) -> dict[str, Any]:
+        """Fetch the backend-owned profile region catalog."""
+        payload = await self._http.get(
+            "/users/profile/regions",
+            params={"locale": str(locale or "").strip() or "zh-CN"},
+        )
+        return dict(payload or {})
+
     async def update_me(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Update the current user's profile."""
         response = await self._http.put("/users/me", json=payload)

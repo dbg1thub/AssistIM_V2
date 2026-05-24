@@ -13,6 +13,7 @@ from sqlalchemy.exc import SAWarning
 
 from app.core.config import get_settings
 from app.media.generated_avatars import build_generated_user_avatar
+from app.services.region_catalog import RegionCatalog
 
 USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "email": "VARCHAR(255)",
@@ -20,6 +21,8 @@ USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "phone": "VARCHAR(32)",
     "birthday": "DATE",
     "region": "VARCHAR(128)",
+    "region_country_code": "VARCHAR(2)",
+    "region_subdivision_code": "VARCHAR(16)",
     "signature": "TEXT",
     "gender": "VARCHAR(32)",
     "auth_session_version": "INTEGER NOT NULL DEFAULT 0",
@@ -209,7 +212,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260524_0025"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260524_0026"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -1260,6 +1263,54 @@ def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> N
         applied.append("users.avatar_state.backfill")
 
 
+def _backfill_user_region_codes(connection: Connection, applied: list[str]) -> None:
+    if "users" not in _get_table_names(connection):
+        return
+    columns = _get_column_names(connection, "users")
+    if {"region", "region_country_code", "region_subdivision_code"} - columns:
+        return
+
+    rows = connection.execute(
+        text(
+            """
+            SELECT id, region
+            FROM users
+            WHERE region IS NOT NULL
+              AND TRIM(region) <> ''
+              AND region_country_code IS NULL
+              AND region_subdivision_code IS NULL
+            """
+        )
+    ).mappings().all()
+    if not rows:
+        return
+
+    catalog = RegionCatalog()
+    touched = False
+    for row in rows:
+        country_code, subdivision_code = catalog.match_legacy_region_text(row["region"])
+        connection.execute(
+            text(
+                """
+                UPDATE users
+                SET region_country_code = :country_code,
+                    region_subdivision_code = :subdivision_code,
+                    region = NULL
+                WHERE id = :user_id
+                """
+            ),
+            {
+                "country_code": country_code,
+                "subdivision_code": subdivision_code,
+                "user_id": row["id"],
+            },
+        )
+        touched = True
+
+    if touched:
+        applied.append("users.region_codes.backfill")
+
+
 def _backfill_group_avatar_state(connection: Connection, applied: list[str]) -> None:
     if "groups" not in _get_table_names(connection):
         return
@@ -1323,6 +1374,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _backfill_session_last_event_seq(connection, applied)
         _backfill_session_member_read_state(connection, applied)
         _backfill_file_storage_metadata(connection, applied)
+        _backfill_user_region_codes(connection, applied)
         _backfill_user_avatar_state(connection, applied)
         _backfill_group_avatar_state(connection, applied)
 

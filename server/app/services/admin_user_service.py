@@ -14,6 +14,7 @@ from app.models.user import Friendship, User
 from app.repositories.user_repo import UserRepository
 from app.services.admin_audit_service import AdminAuditService
 from app.services.avatar_service import AvatarService
+from app.services.region_catalog import RegionCatalog
 from app.utils.time import isoformat_utc, utcnow
 
 
@@ -25,6 +26,7 @@ class AdminUserService:
         self.users = UserRepository(db)
         self.audit = AdminAuditService(db)
         self.avatars = AvatarService(db)
+        self.regions = RegionCatalog()
 
     def list_users(
         self,
@@ -253,6 +255,12 @@ class AdminUserService:
     def serialize_admin_user(self, user: User) -> dict:
         nickname = str(user.nickname or "")
         username = str(user.username or "")
+        region_country_code = self.regions.normalize_country_code(getattr(user, "region_country_code", None)) or None
+        region_subdivision_code = self.regions.normalize_subdivision_code(getattr(user, "region_subdivision_code", None)) or None
+        region_display = self.regions.display_region(
+            country_code=region_country_code,
+            subdivision_code=region_subdivision_code,
+        )
         return {
             "id": str(user.id or ""),
             "username": username,
@@ -264,7 +272,10 @@ class AdminUserService:
             "email_verified": bool(getattr(user, "email_verified", False)),
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,
-            "region": user.region,
+            "region": region_display or None,
+            "region_display": region_display,
+            "region_country_code": region_country_code,
+            "region_subdivision_code": region_subdivision_code,
             "signature": user.signature,
             "gender": user.gender,
             "status": user.status,

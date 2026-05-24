@@ -401,7 +401,8 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
             "email_code": email_code,
             "phone": "+82-10-1111-2222",
             "birthday": "1996-02-21",
-            "region": "Seoul",
+            "region_country_code": "KR",
+            "region_subdivision_code": "KR-11",
             "signature": "Testing profile updates.",
             "gender": "female",
             "status": "online",
@@ -414,7 +415,9 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     assert payload["email_verified"] is True
     assert payload["phone"] == "+82-10-1111-2222"
     assert payload["birthday"] == "1996-02-21"
-    assert payload["region"] == "Seoul"
+    assert payload["region_country_code"] == "KR"
+    assert payload["region_subdivision_code"] == "KR-11"
+    assert payload["region"] == payload["region_display"]
     assert payload["signature"] == "Testing profile updates."
     assert payload["gender"] == "female"
     assert payload["status"] == "online"
@@ -426,7 +429,8 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
             "email": "",
             "phone": "",
             "birthday": "",
-            "region": "",
+            "region_country_code": "",
+            "region_subdivision_code": "",
             "signature": "",
             "gender": "",
         },
@@ -438,6 +442,9 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     assert cleared_payload["phone"] is None
     assert cleared_payload["birthday"] is None
     assert cleared_payload["region"] is None
+    assert cleared_payload["region_display"] == ""
+    assert cleared_payload["region_country_code"] is None
+    assert cleared_payload["region_subdivision_code"] is None
     assert cleared_payload["signature"] is None
     assert cleared_payload["gender"] is None
 
@@ -1048,7 +1055,8 @@ def test_user_search_requires_non_blank_keyword_and_matches_public_fields_only(c
             "email": "bob@example.com",
             "email_code": bob_email_code,
             "phone": "+82-10-3333-4444",
-            "region": "Busan",
+            "region_country_code": "KR",
+            "region_subdivision_code": "KR-26",
             "signature": "Profile details should stay private",
         },
         headers=auth_header(bob["access_token"]),
@@ -1080,5 +1088,7 @@ def test_user_search_requires_non_blank_keyword_and_matches_public_fields_only(c
     assert [item["id"] for item in payload] == [bob["user"]["id"]]
     assert "email" not in payload[0]
     assert "phone" not in payload[0]
-    assert payload[0]["region"] == "Busan"
+    assert payload[0]["region_country_code"] == "KR"
+    assert payload[0]["region_subdivision_code"] == "KR-26"
+    assert payload[0]["region"] == payload[0]["region_display"]
     assert payload[0]["signature"] == "Profile details should stay private"

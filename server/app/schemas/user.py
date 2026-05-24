@@ -22,9 +22,28 @@ class UserOut(ORMModel):
     phone: str | None = None
     birthday: date | None = None
     region: str | None = None
+    region_display: str = ""
+    region_country_code: str | None = None
+    region_subdivision_code: str | None = None
     signature: str | None = None
     gender: str | None = None
     status: str
+
+
+class RegionSubdivisionOut(BaseModel):
+    code: str
+    name: str
+
+
+class RegionCountryOut(BaseModel):
+    code: str
+    name: str
+    subdivisions: list[RegionSubdivisionOut] = Field(default_factory=list)
+
+
+class RegionCatalogOut(BaseModel):
+    locale: str
+    countries: list[RegionCountryOut] = Field(default_factory=list)
 
 
 class UserUpdateRequest(BaseModel):
@@ -39,19 +58,31 @@ class UserUpdateRequest(BaseModel):
     email_code: str | None = Field(default=None, min_length=6, max_length=6)
     phone: str | None = Field(default=None, max_length=32)
     birthday: date | None = None
-    region: str | None = Field(default=None, max_length=128)
+    region_country_code: str | None = Field(default=None, max_length=2)
+    region_subdivision_code: str | None = Field(default=None, max_length=16)
     signature: str | None = Field(default=None, max_length=255)
     gender: str | None = Field(default=None, max_length=32)
     status: str | None = Field(default=None, max_length=32)
 
-    @field_validator("nickname", "email", "email_code", "phone", "region", "signature", "gender", "status", mode="before")
+    @field_validator(
+        "nickname",
+        "email",
+        "email_code",
+        "phone",
+        "region_country_code",
+        "region_subdivision_code",
+        "signature",
+        "gender",
+        "status",
+        mode="before",
+    )
     @classmethod
     def _strip_string_fields(cls, value):
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("email", "email_code", "phone", "region", "signature", "gender", mode="before")
+    @field_validator("email", "email_code", "phone", "region_country_code", "region_subdivision_code", "signature", "gender", mode="before")
     @classmethod
     def _empty_string_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
