@@ -76,6 +76,7 @@ from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog, FluentDialogTitleButton
 from client.ui.widgets.fluent_splitter import FluentSplitter
+from client.ui.widgets.static_card_frame import StaticCardFrame
 from client.ui.widgets.contact_shared import (
     CONTACT_SIDEBAR_AVATAR_SIZE,
     CONTACT_SIDEBAR_CONTENT_GAP,
@@ -709,7 +710,7 @@ class ContactActionButton(QWidget):
         super().paintEvent(event)
 
 
-class ContactDetailCard(CardWidget):
+class ContactDetailCard(StaticCardFrame):
     message_requested = Signal(object)
     call_requested = Signal(object, str)
     remark_edit_requested = Signal(object)

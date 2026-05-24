@@ -300,7 +300,9 @@ def test_contact_detail_panel_only_opens_for_friend_items() -> None:
     profile_update_block = contact_interface.split('def _apply_profile_update_payload', 1)[1].split('async def _reload_data_async', 1)[0]
 
     assert 'class GalleryContactDetailPanel' not in contact_interface
-    assert 'class ContactDetailCard(CardWidget):' in contact_interface
+    assert 'from client.ui.widgets.static_card_frame import StaticCardFrame' in contact_interface
+    assert 'class ContactDetailCard(StaticCardFrame):' in contact_interface
+    assert 'class ContactDetailCard(CardWidget):' not in contact_interface
     assert 'class ContactDetailPanel(QWidget):' in contact_interface
     assert 'self.card_stack = AnimatedStackWidget(self)' in detail_panel_block
     assert 'self._cards = [ContactDetailCard(self.card_stack), ContactDetailCard(self.card_stack)]' in detail_panel_block
@@ -2251,7 +2253,9 @@ def test_contact_detail_call_entry_opens_direct_chat_before_starting_call() -> N
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 
     assert 'class ContactDetailPanel(QWidget):' in contact_interface
-    assert 'class ContactDetailCard(CardWidget):' in contact_interface
+    assert 'from client.ui.widgets.static_card_frame import StaticCardFrame' in contact_interface
+    assert 'class ContactDetailCard(StaticCardFrame):' in contact_interface
+    assert 'class ContactDetailCard(CardWidget):' not in contact_interface
     assert 'class GalleryContactDetailPanel' not in contact_interface
     assert 'contact.detail.unavailable_content' not in contact_interface
     assert 'self.voice_button.clicked.connect(self._show_unavailable)' not in contact_interface
