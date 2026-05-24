@@ -6103,13 +6103,13 @@ def test_collection_icon_library_is_downloaded_and_addressable() -> None:
     assert 'client/resources/icons/iconfont_51777' in group_path.as_posix()
 
 
-def test_app_icon_default_theme_colors_match_fluent_icon_palette() -> None:
+def test_app_icon_default_theme_colors_match_primary_button_foreground() -> None:
     light_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.LIGHT)
     dark_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.DARK)
     explicit_fill_svg = app_icons_module._render_svg_markup('add', fill='#202020')
 
-    assert '#686868' in light_svg
-    assert '#B8B8B8' in dark_svg
+    assert '#000000' in light_svg
+    assert '#FFFFFF' in dark_svg
     assert '#202020' in explicit_fill_svg
     assert 'opacity=' not in light_svg
     assert 'opacity=' not in dark_svg
