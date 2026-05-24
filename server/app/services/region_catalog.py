@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from pathlib import Path
 
 from babel import Locale, UnknownLocaleError
 import pycountry
@@ -14,6 +16,17 @@ class RegionCatalog:
     """Resolve, validate, and display ISO country/subdivision region codes."""
 
     DEFAULT_LOCALE = "zh-CN"
+    _SUBDIVISION_RESOURCE_PATH = Path(__file__).resolve().parents[1] / "resources" / "region_subdivisions.json"
+    _SUBDIVISION_LOCALE_ALIASES = {
+        "zh": "zh-CN",
+        "zh-cn": "zh-CN",
+        "zh-hans": "zh-CN",
+        "zh-hans-cn": "zh-CN",
+        "en": "en-US",
+        "en-us": "en-US",
+        "ko": "ko-KR",
+        "ko-kr": "ko-KR",
+    }
     _LEGACY_COUNTRY_ALIASES = {
         "中国大陆": "CN",
         "中国": "CN",
@@ -190,7 +203,50 @@ class RegionCatalog:
         code = str(subdivision_code or "").upper()
         item = pycountry.subdivisions.get(code=code)
         key = code.replace("-", "").lower()
-        return str(getattr(locale, "subdivisions", {}).get(key) or getattr(item, "name", code) or code)
+        return str(RegionCatalog._localized_subdivision_name(key, locale) or getattr(item, "name", code) or code)
+
+    @classmethod
+    def _localized_subdivision_name(cls, subdivision_key: str, locale: Locale) -> str:
+        names = cls._subdivision_names_by_locale().get(cls._subdivision_locale_key(locale), {})
+        return str(names.get(str(subdivision_key or "").strip().lower()) or "")
+
+    @classmethod
+    def _subdivision_locale_key(cls, locale: Locale) -> str:
+        candidates = [
+            str(locale).replace("_", "-").lower(),
+            "-".join(
+                part
+                for part in (
+                    str(getattr(locale, "language", "") or "").lower(),
+                    str(getattr(locale, "script", "") or "").lower(),
+                    str(getattr(locale, "territory", "") or "").lower(),
+                )
+                if part
+            ),
+            str(getattr(locale, "language", "") or "").lower(),
+        ]
+        for candidate in candidates:
+            if candidate in cls._SUBDIVISION_LOCALE_ALIASES:
+                return cls._SUBDIVISION_LOCALE_ALIASES[candidate]
+        return cls._SUBDIVISION_LOCALE_ALIASES["en"]
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _subdivision_names_by_locale(cls) -> dict[str, dict[str, str]]:
+        payload = json.loads(cls._SUBDIVISION_RESOURCE_PATH.read_text(encoding="utf-8"))
+        locales = payload.get("locales") if isinstance(payload, dict) else None
+        if not isinstance(locales, dict):
+            raise ValueError("region subdivision resource must include locales")
+        result: dict[str, dict[str, str]] = {}
+        for locale, names in locales.items():
+            if not isinstance(names, dict):
+                continue
+            result[str(locale)] = {
+                str(code).strip().lower(): str(name).strip()
+                for code, name in names.items()
+                if str(code).strip() and str(name).strip()
+            }
+        return result
 
     def _match_country_name(self, value: str) -> str | None:
         text = str(value or "").strip()
