@@ -740,6 +740,21 @@ def test_generated_user_avatar_builder_writes_png() -> None:
     assert avatar_path.read_bytes().startswith(b"\x89PNG")
 
 
+def test_generated_user_avatar_initial_uses_bold_font_and_stroke() -> None:
+    source = Path("server/app/media/generated_avatars.py").read_text(encoding="utf-8")
+    candidate_block = source.split("def _candidate_font_paths", 1)[1]
+    draw_block = source.split("draw.text(", 1)[1].split("temporary_path", 1)[0]
+
+    assert 'Path("C:/Windows/Fonts/msyhbd.ttc")' in candidate_block
+    assert 'Path("C:/Windows/Fonts/arialbd.ttf")' in candidate_block
+    assert 'Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")' in candidate_block
+    assert 'Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")' in candidate_block
+    assert candidate_block.index("msyhbd.ttc") < candidate_block.index("msyh.ttc")
+    assert candidate_block.index("arialbd.ttf") < candidate_block.index("arial.ttf")
+    assert "stroke_width=max(1, output_size // 96)" in draw_block
+    assert "stroke_fill=foreground" in draw_block
+
+
 
 
 

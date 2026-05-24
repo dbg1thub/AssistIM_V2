@@ -64,6 +64,8 @@ def build_generated_user_avatar(
         initial,
         font=font,
         fill=foreground,
+        stroke_width=max(1, output_size // 96),
+        stroke_fill=foreground,
     )
 
     temporary_path = target_path.with_name(f".{target_path.name}.tmp")
@@ -118,9 +120,13 @@ def _avatar_font(size: int) -> ImageFont.ImageFont:
 
 def _candidate_font_paths() -> tuple[Path, ...]:
     return (
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
         Path("C:/Windows/Fonts/msyh.ttc"),
         Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     )
