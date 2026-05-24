@@ -803,6 +803,9 @@ def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -
     assert 'hover_enabled: bool = True' in toggle_badge
     assert 'press_enabled: bool = True' in toggle_badge
     assert 'show_border: bool = True' in toggle_badge
+    assert '_HORIZONTAL_PADDING = 8' in toggle_badge
+    assert '_VERTICAL_PADDING = 3' in toggle_badge
+    assert '_ICON_TEXT_SPACING = 3' in toggle_badge
     assert 'self.setProperty("checked", self._checked)' in toggle_badge
     assert 'self.setProperty("pressed", self._pressed)' in toggle_badge
     assert 'self.setProperty("hoverEnabled", self._hover_enabled)' in toggle_badge
@@ -820,7 +823,16 @@ def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -
     assert 'icon.render(painter, icon_rect, fill=self._badge._icon_color())' in toggle_badge
     assert 'def paintEvent(self, event) -> None:' in toggle_badge
     assert 'super().paintEvent(event)' in toggle_badge_block
+    assert 'if self._has_inner_fill():' in toggle_badge_block
+    assert 'inner_rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)' in toggle_badge_block
+    assert 'inner_radius = min(10.0, inner_rect.height() / 2)' in toggle_badge_block
+    assert 'painter.setBrush(self._inner_fill_color())' in toggle_badge_block
+    assert 'painter.drawRoundedRect(inner_rect, inner_radius, inner_radius)' in toggle_badge_block
+    assert 'painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)' not in toggle_badge_block
+    assert 'painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)' in toggle_badge_block
     assert 'painter.drawRoundedRect(border_rect, radius, radius)' in toggle_badge_block
+    assert 'def _has_inner_fill(self) -> bool:' in toggle_badge_block
+    assert 'def _inner_fill_color(self) -> QColor:' in toggle_badge_block
     assert 'def _border_color(self) -> QColor:' in toggle_badge_block
     assert 'QFrame#ToggleBadge[borderVisible="true"]' not in light_qss
     assert 'border: 1px solid rgba(17, 24, 39, 0.18);' not in light_qss

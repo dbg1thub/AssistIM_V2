@@ -32,11 +32,27 @@ def _render_badge(*, show_border: bool = True):
     return badge.grab().toImage()
 
 
+def _render_empty_badge(*, show_border: bool = True, checked: bool = False):
+    app = _ensure_app()
+    root = QWidget()
+    root.setStyleSheet(StyleSheet.DISCOVERY_INTERFACE.content(Theme.LIGHT))
+    layout = QVBoxLayout(root)
+    layout.setContentsMargins(20, 20, 20, 20)
+    badge = ToggleBadge("", parent=root, show_border=show_border, checked=checked)
+    layout.addWidget(badge)
+    root.resize(80, 50)
+    root.show()
+    app.processEvents()
+    return badge.grab().toImage()
+
+
 def test_toggle_badge_border_is_visibly_painted_when_enabled() -> None:
     image = _render_badge(show_border=True)
     center_color = image.pixelColor(image.width() // 2, image.height() // 2).getRgb()
     edge_color = image.pixelColor(image.width() - 1, image.height() // 2).getRgb()
 
+    assert image.width() <= 46
+    assert image.height() <= 20
     assert _rgb_distance(center_color, edge_color) >= 60
 
 
@@ -46,3 +62,14 @@ def test_toggle_badge_border_can_be_hidden() -> None:
     edge_color = image.pixelColor(image.width() - 1, image.height() // 2).getRgb()
 
     assert _rgb_distance(center_color, edge_color) < 60
+
+
+def test_toggle_badge_inner_fill_is_hidden_until_interactive_state() -> None:
+    normal_image = _render_empty_badge(show_border=False, checked=False)
+    checked_image = _render_empty_badge(show_border=False, checked=True)
+    normal_center = normal_image.pixelColor(normal_image.width() // 2, normal_image.height() // 2).getRgb()
+    normal_background = normal_image.pixelColor(2, 2).getRgb()
+    checked_center = checked_image.pixelColor(checked_image.width() // 2, checked_image.height() // 2).getRgb()
+
+    assert _rgb_distance(normal_center, normal_background) < 8
+    assert _rgb_distance(normal_center, checked_center) >= 8

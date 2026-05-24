@@ -44,9 +44,9 @@ class ToggleBadge(QFrame):
     clicked = Signal()
     toggled = Signal(bool)
 
-    _HORIZONTAL_PADDING = 10
-    _VERTICAL_PADDING = 4
-    _ICON_TEXT_SPACING = 4
+    _HORIZONTAL_PADDING = 8
+    _VERTICAL_PADDING = 3
+    _ICON_TEXT_SPACING = 3
     _DEFAULT_ICON_SIZE = QSize(12, 12)
 
     def __init__(
@@ -182,14 +182,21 @@ class ToggleBadge(QFrame):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if not self._border_visible:
-            return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._has_inner_fill():
+            inner_rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)
+            inner_radius = min(10.0, inner_rect.height() / 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._inner_fill_color())
+            painter.drawRoundedRect(inner_rect, inner_radius, inner_radius)
+
+        if not self._border_visible:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(self._border_color(), 1))
-
         border_rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         radius = min(10.0, border_rect.height() / 2)
         painter.drawRoundedRect(border_rect, radius, radius)
@@ -284,6 +291,23 @@ class ToggleBadge(QFrame):
         if self.underMouse() and self._hover_enabled:
             return "#F8FAFC" if dark else "#111827"
         return "#D8D8D8" if dark else "#5F5F5F"
+
+    def _has_inner_fill(self) -> bool:
+        return bool(
+            self._checked
+            or (self._pressed and self._press_enabled)
+            or (self.underMouse() and self._hover_enabled)
+        )
+
+    def _inner_fill_color(self) -> QColor:
+        dark = isDarkTheme()
+        if self._checked:
+            return QColor(252, 165, 165, 42) if dark else QColor(224, 102, 102, 34)
+        if self._pressed and self._press_enabled:
+            return QColor(255, 255, 255, 36) if dark else QColor(17, 24, 39, 30)
+        if self.underMouse() and self._hover_enabled:
+            return QColor(255, 255, 255, 30) if dark else QColor(17, 24, 39, 24)
+        return QColor(0, 0, 0, 0)
 
     def _border_color(self) -> QColor:
         dark = isDarkTheme()
