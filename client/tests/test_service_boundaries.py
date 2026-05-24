@@ -6076,6 +6076,7 @@ def test_app_icon_paths_point_to_generated_svg_assets() -> None:
 
 def test_app_icon_render_scale_is_applied_at_runtime() -> None:
     original_scale = app_icons_module.get_icon_render_scale()
+    assert original_scale == 1.2
 
     try:
         app_icons_module.set_icon_render_scale(1.0)

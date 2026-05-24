@@ -433,7 +433,7 @@ class AIAssistantInterface(QWidget):
             self.content_panel,
         )
         self.scroll_to_bottom_button.setObjectName("aiAssistantScrollToBottomButton")
-        self.scroll_to_bottom_button.setIcon(CollectionIcon("arrow_down").icon())
+        self.scroll_to_bottom_button.setIcon(CollectionIcon("arrow_down"))
         self.scroll_to_bottom_button.setFixedHeight(34)
         self.scroll_to_bottom_button.hide()
         self.scroll_to_bottom_button.clicked.connect(self._on_scroll_to_bottom_clicked)

@@ -293,6 +293,8 @@ def test_toolbar_icons_use_attach_and_call_glyphs() -> None:
     assert 'ATTACH = "attach"' in app_icons
     assert 'CALL = "call"' in app_icons
     assert 'TransparentToolButton(AppIcon.ATTACH, self.composer_widget)' in ai_assistant
+    assert 'self.scroll_to_bottom_button.setIcon(CollectionIcon("arrow_down"))' in ai_assistant
+    assert 'self.scroll_to_bottom_button.setIcon(CollectionIcon("arrow_down").icon())' not in ai_assistant
     assert 'TransparentToolButton(AppIcon.CALL, self.composer_widget)' in message_input
     assert 'ContactActionButton(AppIcon.CALL, tr("contact.detail.action.voice_call", "Voice Call"), self.header)' in contact_interface
     assert 'self.attachment_button = TransparentToolButton(AppIcon.ADD, self.composer_widget)' not in ai_assistant
@@ -732,9 +734,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'icon=AppIcon.HOME' not in discovery_interface
     assert 'icon=AppIcon.PHOTO' not in discovery_interface
     assert 'icon=AppIcon.ATTACH' not in discovery_interface
-    assert 'self.image_button.setIcon(AppIcon.PHOTO.icon())' in discovery_interface
-    assert 'self.link_button.setIcon(AppIcon.ATTACH.icon())' in discovery_interface
-    assert 'self.publish_button.setIcon(AppIcon.SEND_FILL.icon())' in discovery_interface
+    assert 'self.image_button.setIcon(AppIcon.PHOTO)' in discovery_interface
+    assert 'self.link_button.setIcon(AppIcon.ATTACH)' in discovery_interface
+    assert 'self.publish_button.setIcon(AppIcon.SEND_FILL)' in discovery_interface
+    assert 'self.image_button.setIcon(AppIcon.PHOTO.icon())' not in discovery_interface
+    assert 'self.link_button.setIcon(AppIcon.ATTACH.icon())' not in discovery_interface
+    assert 'self.publish_button.setIcon(AppIcon.SEND_FILL.icon())' not in discovery_interface
     assert 'content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL' in discovery_interface
     assert 'self.feed_layout.addWidget(FluentDivider(self.feed_container, variant=FluentDivider.FULL' in discovery_interface
     assert 'QWidget#MomentsLeftPanel' in qss
