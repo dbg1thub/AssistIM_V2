@@ -793,6 +793,7 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
 
 def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -> None:
     toggle_badge = Path('client/ui/widgets/toggle_badge.py').read_text(encoding='utf-8')
+    toggle_badge_block = toggle_badge.split('class ToggleBadge(QFrame):', 1)[1]
     light_qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
     dark_qss = Path('client/ui/styles/qss/dark/discovery_interface.qss').read_text(encoding='utf-8')
 
@@ -817,14 +818,18 @@ def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -
     assert 'def minimumSizeHint(self) -> QSize:' in toggle_badge
     assert 'self.updateGeometry()' in toggle_badge
     assert 'icon.render(painter, icon_rect, fill=self._badge._icon_color())' in toggle_badge
-    assert 'QFrame#ToggleBadge[borderVisible="true"]' in light_qss
-    assert 'border: 1px solid rgba(17, 24, 39, 0.18);' in light_qss
+    assert 'def paintEvent(self, event) -> None:' in toggle_badge
+    assert 'super().paintEvent(event)' in toggle_badge_block
+    assert 'painter.drawRoundedRect(border_rect, radius, radius)' in toggle_badge_block
+    assert 'def _border_color(self) -> QColor:' in toggle_badge_block
+    assert 'QFrame#ToggleBadge[borderVisible="true"]' not in light_qss
+    assert 'border: 1px solid rgba(17, 24, 39, 0.18);' not in light_qss
     assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in light_qss
     assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in light_qss
     assert 'QFrame#ToggleBadge[checked="true"]' in light_qss
     assert 'QFrame#ToggleBadge[borderVisible="false"]' in light_qss
-    assert 'QFrame#ToggleBadge[borderVisible="true"]' in dark_qss
-    assert 'border: 1px solid rgba(255, 255, 255, 0.20);' in dark_qss
+    assert 'QFrame#ToggleBadge[borderVisible="true"]' not in dark_qss
+    assert 'border: 1px solid rgba(255, 255, 255, 0.20);' not in dark_qss
     assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in dark_qss
     assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in dark_qss
     assert 'QFrame#ToggleBadge[checked="true"]' in dark_qss

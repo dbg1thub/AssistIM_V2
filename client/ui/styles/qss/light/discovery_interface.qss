@@ -197,16 +197,8 @@ QFrame#ToggleBadge {
     border-radius: 10px;
 }
 
-QFrame#ToggleBadge[borderVisible="true"] {
-    border: 1px solid rgba(17, 24, 39, 0.18);
-}
-
 QFrame#ToggleBadge[hoverEnabled="true"]:hover {
     background: {{CARD_BG_STRONG}};
-}
-
-QFrame#ToggleBadge[borderVisible="true"][hoverEnabled="true"]:hover {
-    border: 1px solid rgba(17, 24, 39, 0.24);
 }
 
 QFrame#ToggleBadge[pressEnabled="true"][pressed="true"] {

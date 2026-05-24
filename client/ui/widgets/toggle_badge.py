@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QPainter
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import FluentIconBase, isDarkTheme
 
@@ -180,6 +180,20 @@ class ToggleBadge(QFrame):
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
 
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._border_visible:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(self._border_color(), 1))
+
+        border_rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(10.0, border_rect.height() / 2)
+        painter.drawRoundedRect(border_rect, radius, radius)
+
     def enterEvent(self, event) -> None:
         self.icon_widget.update()
         super().enterEvent(event)
@@ -270,6 +284,16 @@ class ToggleBadge(QFrame):
         if self.underMouse() and self._hover_enabled:
             return "#F8FAFC" if dark else "#111827"
         return "#D8D8D8" if dark else "#5F5F5F"
+
+    def _border_color(self) -> QColor:
+        dark = isDarkTheme()
+        if self._checked:
+            return QColor(252, 165, 165, 150) if dark else QColor(224, 102, 102, 210)
+        if self._pressed and self._press_enabled:
+            return QColor(255, 255, 255, 118) if dark else QColor(17, 24, 39, 112)
+        if self.underMouse() and self._hover_enabled:
+            return QColor(255, 255, 255, 104) if dark else QColor(17, 24, 39, 96)
+        return QColor(255, 255, 255, 88) if dark else QColor(17, 24, 39, 82)
 
     @staticmethod
     def _coerce_icon_size(size: QSize | int | None) -> QSize:
