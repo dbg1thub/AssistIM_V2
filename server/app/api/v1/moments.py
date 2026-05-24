@@ -95,6 +95,8 @@ async def _broadcast_moment_refresh(
 @router.get("")
 def list_moments(
     user_id: str | None = Query(default=None),
+    scope: str = Query(default="all"),
+    content_filter: str = Query(default="all"),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=50),
     current_user: User = Depends(get_current_user),
@@ -104,6 +106,8 @@ def list_moments(
         MomentService(db).list_moments(
             current_user,
             user_id=user_id,
+            scope=scope,
+            content_filter=content_filter,
             page=page,
             size=size,
         )

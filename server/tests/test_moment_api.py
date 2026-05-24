@@ -533,6 +533,102 @@ def test_moment_feed_is_limited_to_self_and_friends(
     assert {item["id"] for item in charlie_payload["items"]} == {charlie_moment["id"]}
 
 
+def test_moment_feed_scope_and_content_filters_apply_before_pagination(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_filter_alice", "Moment Filter Alice")
+    bob = user_factory("moment_filter_bob", "Moment Filter Bob")
+    charlie = user_factory("moment_filter_charlie", "Moment Filter Charlie")
+    _make_friends(client, auth_header, alice, bob)
+
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    alice_text = client.post(
+        "/api/v1/moments",
+        json={"content": "alice plain"},
+        headers=alice_headers,
+    ).json()["data"]
+    alice_media = client.post(
+        "/api/v1/moments",
+        json={"content": "alice media", "media": [{"type": "image", "url": "/uploads/alice.png"}]},
+        headers=alice_headers,
+    ).json()["data"]
+    bob_link = client.post(
+        "/api/v1/moments",
+        json={"content": "bob link https://example.com"},
+        headers=bob_headers,
+    ).json()["data"]
+    bob_media = client.post(
+        "/api/v1/moments",
+        json={"content": "bob media", "media": [{"type": "video", "url": "/uploads/bob.mp4"}]},
+        headers=bob_headers,
+    ).json()["data"]
+    charlie_link = client.post(
+        "/api/v1/moments",
+        json={"content": "charlie hidden https://hidden.example"},
+        headers=charlie_headers,
+    ).json()["data"]
+
+    assert client.post(f"/api/v1/moments/{bob_link['id']}/likes", headers=alice_headers).status_code == 200
+    assert client.post(f"/api/v1/moments/{alice_text['id']}/likes", headers=bob_headers).status_code == 200
+
+    friend_links = client.get(
+        "/api/v1/moments",
+        params={"scope": "feed", "content_filter": "links", "page": 1, "size": 1},
+        headers=alice_headers,
+    )
+    assert friend_links.status_code == 200
+    friend_links_payload = friend_links.json()["data"]
+    assert friend_links_payload["total"] == 1
+    assert [item["id"] for item in friend_links_payload["items"]] == [bob_link["id"]]
+
+    friend_media = client.get(
+        "/api/v1/moments",
+        params={"scope": "feed", "content_filter": "media"},
+        headers=alice_headers,
+    )
+    assert friend_media.status_code == 200
+    assert {item["id"] for item in friend_media.json()["data"]["items"]} == {bob_media["id"]}
+
+    my_media = client.get(
+        "/api/v1/moments",
+        params={"scope": "mine", "content_filter": "media"},
+        headers=alice_headers,
+    )
+    assert my_media.status_code == 200
+    assert [item["id"] for item in my_media.json()["data"]["items"]] == [alice_media["id"]]
+
+    liked = client.get(
+        "/api/v1/moments",
+        params={"scope": "liked"},
+        headers=alice_headers,
+    )
+    assert liked.status_code == 200
+    assert [item["id"] for item in liked.json()["data"]["items"]] == [bob_link["id"]]
+
+    received_likes = client.get(
+        "/api/v1/moments",
+        params={"scope": "received_likes"},
+        headers=alice_headers,
+    )
+    assert received_likes.status_code == 200
+    assert [item["id"] for item in received_likes.json()["data"]["items"]] == [alice_text["id"]]
+
+    default_feed = client.get("/api/v1/moments", headers=alice_headers)
+    assert default_feed.status_code == 200
+    assert {item["id"] for item in default_feed.json()["data"]["items"]} == {
+        alice_text["id"],
+        alice_media["id"],
+        bob_link["id"],
+        bob_media["id"],
+    }
+    assert charlie_link["id"] not in {item["id"] for item in default_feed.json()["data"]["items"]}
+
+
 def test_moment_user_feed_requires_self_or_friend(
     client: TestClient,
     user_factory,

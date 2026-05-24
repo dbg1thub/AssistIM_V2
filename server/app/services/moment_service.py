@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,9 @@ from app.services.user_service import UserService
 MOMENT_COMMENT_PREVIEW_LIMIT = 3
 MOMENT_VISIBILITY_SCOPES = {"public", "private", "include", "exclude"}
 MOMENT_VISIBLE_TIME_SCOPES = {"all", "half_year", "month", "three_days"}
+MOMENT_FEED_SCOPES = {"all", "feed", "mine", "liked", "received_likes"}
+MOMENT_CONTENT_FILTERS = {"all", "media", "links"}
+MOMENT_LINK_RE = re.compile(r"(https?://|www\.)", re.IGNORECASE)
 
 
 class MomentService:
@@ -31,9 +35,13 @@ class MomentService:
         current_user: User | None = None,
         user_id: str | None = None,
         *,
+        scope: str = "all",
+        content_filter: str = "all",
         page: int = 1,
         size: int = 20,
     ) -> dict:
+        normalized_scope = self._normalize_feed_scope(scope)
+        normalized_content_filter = self._normalize_content_filter(content_filter)
         normalized_page = max(1, page)
         normalized_size = max(1, size)
         visible_user_ids: list[str] | None = None
@@ -51,6 +59,9 @@ class MomentService:
             if current_user is not None
             else candidate_moments
         )
+        if current_user is not None and not user_id:
+            moments = self._filter_moments_by_scope(current_user, moments, normalized_scope)
+        moments = self._filter_moments_by_content(moments, normalized_content_filter)
         total = len(moments)
         offset = (normalized_page - 1) * normalized_size
         moments = moments[offset : offset + normalized_size]
@@ -377,6 +388,46 @@ class MomentService:
             if self._can_view_moment(current_user, moment, settings_map=settings_map)
         ]
 
+    def _filter_moments_by_scope(self, current_user: User, moments: list, scope: str) -> list:
+        if scope == "all":
+            return moments
+        current_user_id = str(current_user.id or "")
+        if scope == "feed":
+            return [moment for moment in moments if str(getattr(moment, "user_id", "") or "") != current_user_id]
+        if scope == "mine":
+            return [moment for moment in moments if str(getattr(moment, "user_id", "") or "") == current_user_id]
+
+        moment_ids = [str(getattr(moment, "id", "") or "") for moment in moments]
+        if scope == "liked":
+            liked_moment_ids = self.moments.get_liked_moment_ids(moment_ids, current_user_id)
+            return [moment for moment in moments if str(getattr(moment, "id", "") or "") in liked_moment_ids]
+        if scope == "received_likes":
+            like_counts_map = self.moments.get_like_counts_map(moment_ids)
+            return [
+                moment
+                for moment in moments
+                if str(getattr(moment, "user_id", "") or "") == current_user_id
+                and like_counts_map.get(str(getattr(moment, "id", "") or ""), 0) > 0
+            ]
+        return moments
+
+    def _filter_moments_by_content(self, moments: list, content_filter: str) -> list:
+        if content_filter == "all":
+            return moments
+        if content_filter == "media":
+            return [
+                moment
+                for moment in moments
+                if bool(self._load_media_items(getattr(moment, "media_json", "[]")))
+            ]
+        if content_filter == "links":
+            return [
+                moment
+                for moment in moments
+                if bool(MOMENT_LINK_RE.search(str(getattr(moment, "content", "") or "")))
+            ]
+        return moments
+
     def _can_view_moment(self, current_user: User, moment, *, settings_map: dict | None = None) -> bool:
         author_user_id = str(getattr(moment, "user_id", "") or "").strip()
         if not author_user_id:
@@ -626,6 +677,20 @@ class MomentService:
     def _normalize_visibility_scope(value: object) -> str:
         candidate = str(value or "public").strip().lower()
         return candidate if candidate in MOMENT_VISIBILITY_SCOPES else "public"
+
+    @staticmethod
+    def _normalize_feed_scope(value: object) -> str:
+        candidate = str(value or "all").strip().lower()
+        if candidate not in MOMENT_FEED_SCOPES:
+            raise AppError(ErrorCode.INVALID_REQUEST, "invalid moment feed scope", 400)
+        return candidate
+
+    @staticmethod
+    def _normalize_content_filter(value: object) -> str:
+        candidate = str(value or "all").strip().lower()
+        if candidate not in MOMENT_CONTENT_FILTERS:
+            raise AppError(ErrorCode.INVALID_REQUEST, "invalid moment content filter", 400)
+        return candidate
 
     @staticmethod
     def _normalize_user_id_list(user_ids: list[str] | None) -> list[str]:

@@ -306,6 +306,7 @@ class AppIcon(FluentIconBase, Enum):
     GENDER_FEMALE = "gender_female"
     GENDER_MALE = "gender_male"
     GLOBE = "globe"
+    HEART = "heart"
     HOME = "home"
     INFO = "info"
     LANGUAGE = "local_language"

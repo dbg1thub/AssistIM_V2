@@ -51,6 +51,27 @@ def test_discovery_service_fetch_moments_requires_paged_envelope(monkeypatch) ->
     asyncio.run(scenario())
 
 
+def test_discovery_service_fetch_moments_passes_scope_and_content_filter(monkeypatch) -> None:
+    fake_http = FakeHttpClient(
+        {
+            "total": 0,
+            "page": 1,
+            "size": 20,
+            "items": [],
+        }
+    )
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+        payload = await service.fetch_moments(scope="liked", content_filter="media")
+
+        assert fake_http.get_calls == [("/moments", {"scope": "liked", "content_filter": "media"})]
+        assert payload == []
+
+    asyncio.run(scenario())
+
+
 def test_discovery_service_fetch_moments_rejects_legacy_list_payload(monkeypatch) -> None:
     fake_http = FakeHttpClient([{"id": "legacy-moment"}])
     monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)

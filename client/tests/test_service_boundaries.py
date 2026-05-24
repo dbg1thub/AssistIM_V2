@@ -1093,7 +1093,7 @@ class FakeContactService:
 
 class FakeDiscoveryService:
     def __init__(self) -> None:
-        self.fetch_moments_calls: list[str | None] = []
+        self.fetch_moments_calls: list[tuple[str | None, str | None, str | None]] = []
         self.get_moment_calls: list[str] = []
         self.create_moment_calls: list[tuple[str, list[dict], str, list[str]]] = []
         self.update_moment_calls: list[tuple[str, str, str, list[str]]] = []
@@ -1120,8 +1120,14 @@ class FakeDiscoveryService:
             'items': [],
         }
 
-    async def fetch_moments(self, *, user_id: str | None = None) -> list[dict]:
-        self.fetch_moments_calls.append(user_id)
+    async def fetch_moments(
+        self,
+        *,
+        user_id: str | None = None,
+        scope: str | None = None,
+        content_filter: str | None = None,
+    ) -> list[dict]:
+        self.fetch_moments_calls.append((user_id, scope, content_filter))
         return [dict(item) for item in self.moments_payload]
 
     async def get_moment(self, moment_id: str) -> dict:
@@ -3287,7 +3293,7 @@ def test_discovery_controller_load_moments_uses_services(monkeypatch) -> None:
         controller = discovery_controller_module.DiscoveryController()
         moments = await controller.load_moments()
 
-        assert fake_discovery_service.fetch_moments_calls == [None]
+        assert fake_discovery_service.fetch_moments_calls == [(None, None, None)]
         assert set(fake_user_service.fetch_user_calls) == {'user-2', 'user-3'}
         assert len(moments) == 1
         assert moments[0].display_name == 'Bob'
@@ -3298,6 +3304,25 @@ def test_discovery_controller_load_moments_uses_services(monkeypatch) -> None:
         assert moments[0].comments[0].display_name == 'Charlie'
         assert moments[0].comments[0].image is not None
         assert moments[0].comments[0].image.url == '/uploads/comment-photo.png'
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_load_moments_passes_feed_scope_and_filter(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice'})
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+        moments = await controller.load_moments(scope='received_likes', content_filter='links')
+
+        assert moments == []
+        assert fake_discovery_service.fetch_moments_calls == [(None, 'received_likes', 'links')]
 
     asyncio.run(scenario())
 
@@ -6716,7 +6741,7 @@ def test_discovery_controller_ignores_late_results_after_auth_context_change(mon
     fake_user_service.user_payloads = {'user-2': {'id': 'user-2', 'username': 'bob'}}
     fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice'})
 
-    async def stale_fetch_moments(user_id=None):
+    async def stale_fetch_moments(user_id=None, scope=None, content_filter=None):
         fake_auth_context.current_user = {'id': 'user-2', 'username': 'bob'}
         return list(fake_discovery_service.moments_payload)
 

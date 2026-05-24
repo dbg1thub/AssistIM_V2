@@ -610,15 +610,19 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'discovery.profile.avatar_fallback' not in profile_block
     assert 'discovery.profile.avatar_fallback' not in compose_bar_block
     assert 'self.page_stack = AnimatedStackWidget(self)' in feed_panel_block
-    assert 'self.friends_feed_page = MomentsFeedPage(self.page_stack)' in feed_panel_block
-    assert 'self.my_moments_page = MomentsPlaceholderPage(' in feed_panel_block
+    assert 'self.friends_feed_page = MomentsFeedPage("feed", self.page_stack)' in feed_panel_block
+    assert 'self.my_moments_page = MomentsFeedPage("mine", self.page_stack)' in feed_panel_block
+    assert 'self.liked_moments_page = MomentsFeedPage("liked", self.page_stack, show_compose=False)' in feed_panel_block
+    assert 'self.received_likes_page = MomentsFeedPage("received_likes", self.page_stack, show_compose=False)' in feed_panel_block
     assert 'self.placeholder_pages: dict[str, MomentsPlaceholderPage] = {' in feed_panel_block
-    assert '"likes": MomentsPlaceholderPage(' in feed_panel_block
+    assert '"likes": MomentsPlaceholderPage(' not in feed_panel_block
     assert '"saved": MomentsPlaceholderPage(' in feed_panel_block
     assert '"albums": MomentsPlaceholderPage(' in feed_panel_block
     assert '"footprints": MomentsPlaceholderPage(' in feed_panel_block
     assert 'self.page_stack.addWidget(self.friends_feed_page)' in feed_panel_block
     assert 'self.page_stack.addWidget(self.my_moments_page)' in feed_panel_block
+    assert 'self.page_stack.addWidget(self.liked_moments_page)' in feed_panel_block
+    assert 'self.page_stack.addWidget(self.received_likes_page)' in feed_panel_block
     assert 'self.page_stack.slide_to_widget(target, direction="right")' in feed_panel_block
     assert 'layout.setContentsMargins(0, 0, 0, 0)' in right_panel_block
     assert 'layout.setSpacing(0)' in right_panel_block
@@ -642,7 +646,9 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
         '        )'
     ) in nav_item_block
     assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in nav_item_block
-    assert 'nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in left_panel_block
+    assert '"received_likes"' in left_panel_block
+    assert 'AppIcon.HEART' in left_panel_block
+    assert 'nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)' not in left_panel_block
     assert 'layout.setContentsMargins(20, 12, 20, 12)' not in feed_toolbar_block
     assert 'layout.setContentsMargins(20, 12, 20, 12)' not in compose_bar_block
     assert 'layout.setSpacing(6)' not in feed_toolbar_block
@@ -719,11 +725,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.filter_changed.emit(route_key)' in feed_toolbar_block
     assert 'self.feed_stack = AnimatedStackWidget(self)' in feed_page_block
     assert 'self.all_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
-    assert 'self.media_page = MomentsPlaceholderPage(' in feed_page_block
-    assert 'self.links_page = MomentsPlaceholderPage(' in feed_page_block
+    assert 'filter_changed = Signal(str, str)' in feed_page_block
+    assert 'self.media_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
+    assert 'self.links_feed_list = MomentsFeedList(self.feed_stack)' in feed_page_block
     assert 'self.feed_stack.addWidget(self.all_feed_list)' in feed_page_block
-    assert 'self.feed_stack.addWidget(self.media_page)' in feed_page_block
-    assert 'self.feed_stack.addWidget(self.links_page)' in feed_page_block
+    assert 'self.feed_stack.addWidget(self.media_feed_list)' in feed_page_block
+    assert 'self.feed_stack.addWidget(self.links_feed_list)' in feed_page_block
     assert 'self._feed_scrollbar: FluentOverlayScrollBar | None = None' in discovery_interface
     assert 'self.scroll_area.scrollDelagate.vScrollBar.setForceHidden(True)' in discovery_interface
     assert 'self.scroll_area.viewport().removeEventFilter(self.scroll_area.scrollDelagate)' in discovery_interface
@@ -731,6 +738,17 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'mode=FluentOverlayScrollBarDisplayMode.ON_HOVER' in discovery_interface
     assert 'self.toolbar.filter_changed.connect(self.switch_filter)' in feed_page_block
     assert 'self.feed_stack.slide_to_widget(target, direction="right")' in feed_page_block
+    assert 'def feed_list_for(self, route_key: str) -> MomentsFeedList:' in feed_page_block
+    assert 'self.filter_changed.emit(self.scope_key, route_key)' in feed_page_block
+    assert 'view_changed = Signal(str, str)' in feed_panel_block
+    assert 'self.real_pages: dict[str, MomentsFeedPage] = {' in feed_panel_block
+    assert 'self.view_changed.emit(self.current_scope_key, self.current_filter_key)' in feed_panel_block
+    assert 'self.feed_panel.view_changed.connect(self._on_feed_view_changed)' in discovery_interface
+    assert 'def _on_feed_view_changed(self, scope_key: str, content_filter: str) -> None:' in discovery_interface
+    assert 'self._active_scope = "feed"' in discovery_interface
+    assert 'self._active_filter = "all"' in discovery_interface
+    assert 'moments = await self._controller.load_moments(scope=self._active_scope, content_filter=self._active_filter)' in discovery_interface
+    assert 'current_feed = self.feed_panel.current_feed_list()' in discovery_interface
     assert 'icon=AppIcon.HOME' not in discovery_interface
     assert 'icon=AppIcon.PHOTO' not in discovery_interface
     assert 'icon=AppIcon.ATTACH' not in discovery_interface

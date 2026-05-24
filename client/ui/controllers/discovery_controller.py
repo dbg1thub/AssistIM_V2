@@ -179,11 +179,21 @@ class DiscoveryController:
         self._clear_caches()
         self._cache_owner_user_id = normalized_owner
 
-    async def load_moments(self, user_id: Optional[str] = None) -> list[MomentRecord]:
+    async def load_moments(
+        self,
+        user_id: Optional[str] = None,
+        *,
+        scope: str | None = None,
+        content_filter: str | None = None,
+    ) -> list[MomentRecord]:
         """Load moments and enrich authors from the user API when needed."""
         owner_user_id = self._capture_runtime_user_id()
         self._sync_cache_scope(owner_user_id)
-        payload = await self._discovery_service.fetch_moments(user_id=user_id)
+        payload = await self._discovery_service.fetch_moments(
+            user_id=user_id,
+            scope=scope,
+            content_filter=content_filter,
+        )
         self._ensure_runtime_user_id(owner_user_id)
         items = list(payload or [])
 

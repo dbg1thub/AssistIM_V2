@@ -22,10 +22,22 @@ class DiscoveryService:
     def __init__(self) -> None:
         self._http = get_http_client()
 
-    async def fetch_moments(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
+    async def fetch_moments(
+        self,
+        *,
+        user_id: str | None = None,
+        scope: str | None = None,
+        content_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Fetch one discovery timeline snapshot."""
-        params = {"user_id": user_id} if user_id else None
-        payload = await self._http.get("/moments", params=params)
+        params: dict[str, str] = {}
+        if user_id:
+            params["user_id"] = user_id
+        if scope:
+            params["scope"] = scope
+        if content_filter and content_filter != "all":
+            params["content_filter"] = content_filter
+        payload = await self._http.get("/moments", params=params or None)
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
             logger.warning("Unexpected moments payload: %r", payload)
             return []

@@ -130,6 +130,11 @@ def _normalize_media_url_key(value: object) -> str:
     return raw_value
 
 
+def _moment_content_has_link(content: object) -> bool:
+    text = str(content or "").casefold()
+    return "http://" in text or "https://" in text or "www." in text
+
+
 def _apply_safe_button_font(*buttons: TransparentToolButton) -> None:
     """Ensure tooltip rendering gets a valid point-size font."""
     font = QFont()
@@ -2073,7 +2078,7 @@ class MomentsProfileBlock(QWidget):
         stats_row.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.posts", "Moments")))
         stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.friends", "Friends")))
-        stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.likes", "Likes")))
+        stats_row.addWidget(self._create_stat_item("0", tr("discovery.profile.stat.received_likes", "Received Likes")))
         root_layout.addLayout(stats_row)
 
         self.set_current_user(None)
@@ -2144,7 +2149,12 @@ class MomentsLeftPanel(QWidget):
         self._add_nav_item(nav_layout, "feed", AppIcon.PEOPLE, tr("discovery.nav.feed", "Friends Feed"), active=True)
         self._add_nav_item(nav_layout, "mine", AppIcon.HOME, tr("discovery.nav.mine", "My Moments"))
         self._add_nav_item(nav_layout, "likes", AppIcon.CHECK, tr("discovery.nav.likes", "My Likes"), badge_text="0")
-        nav_layout.addSpacing(MOMENTS_PANEL_CONTENT_SPACING)
+        self._add_nav_item(
+            nav_layout,
+            "received_likes",
+            AppIcon.HEART,
+            tr("discovery.nav.received_likes", "Received Likes"),
+        )
         self._add_nav_item(nav_layout, "saved", AppIcon.FOLDER, tr("discovery.nav.saved", "Saved"))
         self._add_nav_item(nav_layout, "albums", AppIcon.PHOTO, tr("discovery.nav.albums", "Albums"))
         self._add_nav_item(nav_layout, "footprints", AppIcon.GLOBE, tr("discovery.nav.footprints", "Footprints"))
@@ -2380,9 +2390,14 @@ class MomentsPlaceholderPage(QWidget):
 class MomentsFeedPage(QWidget):
     """Friends feed page with tabbed animated feed content."""
 
-    def __init__(self, parent=None):
+    filter_changed = Signal(str, str)
+
+    def __init__(self, scope_key: str = "feed", parent=None, *, show_compose: bool = True):
         super().__init__(parent)
         self.setObjectName("MomentsFeedPage")
+        self.scope_key = str(scope_key or "feed")
+        self.active_filter = "all"
+        self._show_compose = bool(show_compose)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2392,26 +2407,21 @@ class MomentsFeedPage(QWidget):
         self.compose_bar = MomentsComposeBar(self)
         self.feed_stack = AnimatedStackWidget(self)
         self.all_feed_list = MomentsFeedList(self.feed_stack)
-        self.media_page = MomentsPlaceholderPage(
-            tr("discovery.feed.tab_media", "Media"),
-            tr("discovery.feed.media_placeholder", "Media moments will be shown here."),
-            self.feed_stack,
-        )
-        self.links_page = MomentsPlaceholderPage(
-            tr("discovery.feed.tab_links", "Links"),
-            tr("discovery.feed.links_placeholder", "Link moments will be shown here."),
-            self.feed_stack,
-        )
+        self.media_feed_list = MomentsFeedList(self.feed_stack)
+        self.links_feed_list = MomentsFeedList(self.feed_stack)
 
         self.feed_stack.addWidget(self.all_feed_list)
-        self.feed_stack.addWidget(self.media_page)
-        self.feed_stack.addWidget(self.links_page)
+        self.feed_stack.addWidget(self.media_feed_list)
+        self.feed_stack.addWidget(self.links_feed_list)
 
         layout.addWidget(self.toolbar, 0)
         layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        self._compose_divider = FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0)
         layout.addWidget(self.compose_bar, 0)
-        layout.addWidget(FluentDivider(self, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        layout.addWidget(self._compose_divider)
         layout.addWidget(self.feed_stack, 1)
+        self.compose_bar.setVisible(self._show_compose)
+        self._compose_divider.setVisible(self._show_compose)
 
         self.refresh_button = self.toolbar.refresh_button
         self.notifications_button = self.toolbar.notifications_button
@@ -2426,14 +2436,34 @@ class MomentsFeedPage(QWidget):
     def set_current_user(self, user: dict | None) -> None:
         self.compose_bar.set_current_user(user)
 
-    def switch_filter(self, route_key: str) -> None:
+    def set_refresh_enabled(self, enabled: bool) -> None:
+        self.refresh_button.setEnabled(enabled)
+
+    def set_publish_enabled(self, enabled: bool) -> None:
+        self.compose_bar.setEnabled(enabled)
+
+    def set_notifications_text(self, text: str) -> None:
+        self.notifications_button.setText(text)
+
+    def feed_list_for(self, route_key: str) -> MomentsFeedList:
         page_map = {
             "all": self.all_feed_list,
-            "media": self.media_page,
-            "links": self.links_page,
+            "media": self.media_feed_list,
+            "links": self.links_feed_list,
         }
-        target = page_map.get(route_key, self.all_feed_list)
+        return page_map.get(route_key, self.all_feed_list)
+
+    def current_feed_list(self) -> MomentsFeedList:
+        return self.feed_list_for(self.active_filter)
+
+    def switch_filter(self, route_key: str) -> None:
+        self.active_filter = route_key if route_key in {"all", "media", "links"} else "all"
+        target = self.feed_list_for(self.active_filter)
         self.feed_stack.slide_to_widget(target, direction="right")
+        self.scroll_area = target.scroll_area
+        self.feed_container = target.feed_container
+        self.feed_layout = target.feed_layout
+        self.filter_changed.emit(self.scope_key, route_key)
 
 
 class MomentsFeedPanel(QWidget):
@@ -2442,29 +2472,31 @@ class MomentsFeedPanel(QWidget):
     refresh_requested = Signal()
     publish_requested = Signal()
     notifications_requested = Signal()
+    view_changed = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("MomentsFeedPanel")
         self.setMinimumWidth(420)
+        self.current_scope_key = "feed"
+        self.current_filter_key = "all"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.page_stack = AnimatedStackWidget(self)
-        self.friends_feed_page = MomentsFeedPage(self.page_stack)
-        self.my_moments_page = MomentsPlaceholderPage(
-            tr("discovery.nav.mine", "My Moments"),
-            tr("discovery.nav.mine_placeholder", "Your moments page will be shown here."),
-            self.page_stack,
-        )
+        self.friends_feed_page = MomentsFeedPage("feed", self.page_stack)
+        self.my_moments_page = MomentsFeedPage("mine", self.page_stack)
+        self.liked_moments_page = MomentsFeedPage("liked", self.page_stack, show_compose=False)
+        self.received_likes_page = MomentsFeedPage("received_likes", self.page_stack, show_compose=False)
+        self.real_pages: dict[str, MomentsFeedPage] = {
+            "feed": self.friends_feed_page,
+            "mine": self.my_moments_page,
+            "likes": self.liked_moments_page,
+            "received_likes": self.received_likes_page,
+        }
         self.placeholder_pages: dict[str, MomentsPlaceholderPage] = {
-            "likes": MomentsPlaceholderPage(
-                tr("discovery.nav.likes", "My Likes"),
-                tr("discovery.nav.likes_placeholder", "Liked moments will be shown here."),
-                self.page_stack,
-            ),
             "saved": MomentsPlaceholderPage(
                 tr("discovery.nav.saved", "Saved"),
                 tr("discovery.nav.saved_placeholder", "Saved moments will be shown here."),
@@ -2484,6 +2516,8 @@ class MomentsFeedPanel(QWidget):
 
         self.page_stack.addWidget(self.friends_feed_page)
         self.page_stack.addWidget(self.my_moments_page)
+        self.page_stack.addWidget(self.liked_moments_page)
+        self.page_stack.addWidget(self.received_likes_page)
         for page in self.placeholder_pages.values():
             self.page_stack.addWidget(page)
         layout.addWidget(self.page_stack, 1)
@@ -2496,23 +2530,55 @@ class MomentsFeedPanel(QWidget):
         self.feed_container = self.friends_feed_page.feed_container
         self.feed_layout = self.friends_feed_page.feed_layout
 
-        self.friends_feed_page.toolbar.refresh_requested.connect(self.refresh_requested.emit)
-        self.friends_feed_page.toolbar.notifications_requested.connect(self.notifications_requested.emit)
-        self.friends_feed_page.compose_bar.publish_requested.connect(self.publish_requested.emit)
-        self.friends_feed_page.compose_bar.image_requested.connect(self.publish_requested.emit)
-        self.friends_feed_page.compose_bar.link_requested.connect(self.publish_requested.emit)
+        for page in self.real_pages.values():
+            page.toolbar.refresh_requested.connect(self.refresh_requested.emit)
+            page.toolbar.notifications_requested.connect(self.notifications_requested.emit)
+            page.filter_changed.connect(self._on_page_filter_changed)
+            page.compose_bar.publish_requested.connect(self.publish_requested.emit)
+            page.compose_bar.image_requested.connect(self.publish_requested.emit)
+            page.compose_bar.link_requested.connect(self.publish_requested.emit)
 
     def set_current_user(self, user: dict | None) -> None:
-        self.friends_feed_page.set_current_user(user)
+        for page in self.real_pages.values():
+            page.set_current_user(user)
+
+    def set_refresh_enabled(self, enabled: bool) -> None:
+        for page in self.real_pages.values():
+            page.set_refresh_enabled(enabled)
+
+    def set_publish_enabled(self, enabled: bool) -> None:
+        for page in self.real_pages.values():
+            page.set_publish_enabled(enabled)
+
+    def set_notifications_text(self, text: str) -> None:
+        for page in self.real_pages.values():
+            page.set_notifications_text(text)
+
+    def current_feed_list(self) -> MomentsFeedList:
+        page = self.real_pages.get(self.current_scope_key, self.friends_feed_page)
+        return page.current_feed_list()
+
+    def feed_list_for(self, scope_key: str, content_filter: str) -> MomentsFeedList:
+        page = self.real_pages.get(scope_key, self.friends_feed_page)
+        return page.feed_list_for(content_filter)
+
+    def _on_page_filter_changed(self, scope_key: str, route_key: str) -> None:
+        if scope_key != self.current_scope_key:
+            return
+        self.current_filter_key = route_key if route_key in {"all", "media", "links"} else "all"
+        self.view_changed.emit(self.current_scope_key, self.current_filter_key)
 
     def switch_page(self, route_key: str) -> None:
         page_map: dict[str, QWidget] = {
-            "feed": self.friends_feed_page,
-            "mine": self.my_moments_page,
+            **self.real_pages,
             **self.placeholder_pages,
         }
         target = page_map.get(route_key, self.friends_feed_page)
         self.page_stack.slide_to_widget(target, direction="right")
+        if isinstance(target, MomentsFeedPage):
+            self.current_scope_key = target.scope_key
+            self.current_filter_key = target.active_filter
+            self.view_changed.emit(self.current_scope_key, self.current_filter_key)
 
 
 class MomentsRightPanel(QWidget):
@@ -2653,6 +2719,8 @@ class DiscoveryInterface(QWidget):
         self._event_bus = get_event_bus()
         self._moments: list[MomentRecord] = []
         self._cards: dict[str, MomentCard] = {}
+        self._active_scope = "feed"
+        self._active_filter = "all"
         self._load_task: Optional[asyncio.Task] = None
         self._publish_task: Optional[asyncio.Task] = None
         self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
@@ -2724,9 +2792,20 @@ class DiscoveryInterface(QWidget):
         self.feed_panel.refresh_requested.connect(self.reload_data)
         self.left_panel.privacy_requested.connect(self._open_privacy_settings_dialog)
         self.left_panel.nav_changed.connect(self.feed_panel.switch_page)
+        self.feed_panel.view_changed.connect(self._on_feed_view_changed)
         self.feed_panel.notifications_requested.connect(self._open_notifications_dialog)
         self.feed_panel.publish_requested.connect(self._open_publish_dialog)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
+
+    def _on_feed_view_changed(self, scope_key: str, content_filter: str) -> None:
+        normalized_scope = scope_key if scope_key in {"feed", "mine", "liked", "received_likes"} else "feed"
+        normalized_filter = content_filter if content_filter in {"all", "media", "links"} else "all"
+        changed = normalized_scope != self._active_scope or normalized_filter != self._active_filter
+        self._active_scope = normalized_scope
+        self._active_filter = normalized_filter
+        self._sync_current_feed_aliases()
+        if changed:
+            self.reload_data()
 
     def reload_data(self) -> None:
         """Refresh the feed from the backend."""
@@ -2764,18 +2843,28 @@ class DiscoveryInterface(QWidget):
         self.reload_data()
 
     async def _reload_data_async(self) -> None:
-        self.refresh_button.setEnabled(False)
+        self.feed_panel.set_refresh_enabled(False)
         try:
-            moments = await self._controller.load_moments()
+            moments = await self._controller.load_moments(scope=self._active_scope, content_filter=self._active_filter)
         except asyncio.CancelledError:
             raise
         finally:
-            self.refresh_button.setEnabled(True)
+            self.feed_panel.set_refresh_enabled(True)
 
         self._moments = moments
         self._rebuild_feed()
 
+    def _sync_current_feed_aliases(self) -> None:
+        current_feed = self.feed_panel.current_feed_list()
+        self.scroll_area = current_feed.scroll_area
+        self.feed_container = current_feed.feed_container
+        self.feed_layout = current_feed.feed_layout
+
     def _rebuild_feed(self) -> None:
+        current_feed = self.feed_panel.current_feed_list()
+        self.scroll_area = current_feed.scroll_area
+        self.feed_container = current_feed.feed_container
+        self.feed_layout = current_feed.feed_layout
         _clear_layout(self.feed_layout)
         self._cards.clear()
 
@@ -2867,11 +2956,11 @@ class DiscoveryInterface(QWidget):
     def _sync_moment_notification_badge(self, unread_count: int) -> None:
         count = max(0, int(unread_count or 0))
         if count:
-            self.notifications_button.setText(
+            self.feed_panel.set_notifications_text(
                 tr("discovery.notifications.button_with_count", "Notifications ({count})", count=count)
             )
             return
-        self.notifications_button.setText(tr("discovery.notifications.button", "Notifications"))
+        self.feed_panel.set_notifications_text(tr("discovery.notifications.button", "Notifications"))
 
     def _mark_moment_notifications_read(self, notification_ids: list) -> None:
         self._create_ui_task(
@@ -2958,7 +3047,7 @@ class DiscoveryInterface(QWidget):
         visibility_scope: str = "public",
         visibility_user_ids: list[str] | None = None,
     ) -> None:
-        self.publish_button.setEnabled(False)
+        self.feed_panel.set_publish_enabled(False)
         try:
             uploaded_media = await self.upload_moment_media(media_paths)
             moment = await self._controller.create_moment(
@@ -2997,11 +3086,14 @@ class DiscoveryInterface(QWidget):
             )
             raise
         finally:
-            self.publish_button.setEnabled(True)
+            self.feed_panel.set_publish_enabled(True)
 
-        self._moments.insert(0, moment)
-        self._rebuild_feed()
-        self.scroll_area.verticalScrollBar().setValue(0)
+        if self._moment_matches_current_view(moment):
+            self._moments.insert(0, moment)
+            self._rebuild_feed()
+            self.scroll_area.verticalScrollBar().setValue(0)
+        else:
+            self.reload_data()
         InfoBar.success(
             tr("discovery.publish.title", "Publish Moment"),
             tr("discovery.publish.success", "Moment published."),
@@ -3067,6 +3159,9 @@ class DiscoveryInterface(QWidget):
         if moment is not None:
             moment.is_liked = liked
             moment.like_count = like_count
+            if not self._moment_matches_current_view(moment):
+                self._moments = [item for item in self._moments if item.id != moment_id]
+                self._rebuild_feed()
 
     def _request_moment_detail(self, moment_id: str) -> None:
         self._schedule_keyed_ui_task(
@@ -3080,6 +3175,10 @@ class DiscoveryInterface(QWidget):
         existing_index = next((index for index, item in enumerate(self._moments) if item.id == moment_id), None)
         if existing_index is not None:
             self._moments[existing_index] = moment
+            if not self._moment_matches_current_view(moment):
+                self._moments.pop(existing_index)
+                self._rebuild_feed()
+                return
 
         card = self._cards.get(moment_id)
         if card is not None:
@@ -3220,6 +3319,10 @@ class DiscoveryInterface(QWidget):
         if existing_index is None:
             return
         self._copy_local_media_previews(self._moments[existing_index], moment)
+        if not self._moment_matches_current_view(moment):
+            self._moments.pop(existing_index)
+            self._rebuild_feed()
+            return
         self._moments[existing_index] = moment
         card = self._cards.get(moment.id)
         if card is not None:
@@ -3318,6 +3421,21 @@ class DiscoveryInterface(QWidget):
         if moment is None:
             return None
         return next((comment for comment in moment.comments if comment.id == comment_id), None)
+
+    def _moment_matches_current_view(self, moment: MomentRecord) -> bool:
+        if self._active_scope == "feed" and moment.is_self:
+            return False
+        if self._active_scope == "mine" and not moment.is_self:
+            return False
+        if self._active_scope == "liked" and not moment.is_liked:
+            return False
+        if self._active_scope == "received_likes" and (not moment.is_self or moment.like_count <= 0):
+            return False
+        if self._active_filter == "media" and not moment.media:
+            return False
+        if self._active_filter == "links" and not _moment_content_has_link(moment.content):
+            return False
+        return True
 
     async def upload_moment_media(self, file_paths: list[str]) -> list[dict[str, object]]:
         """Upload selected moment media files and return normalized client-side payloads."""
