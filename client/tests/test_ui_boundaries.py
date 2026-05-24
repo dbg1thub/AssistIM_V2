@@ -750,7 +750,8 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
 
     assert 'class MomentImageCard(ClickableMediaLabel):' in discovery_interface
     assert 'class MomentVideoCard(ClickableMediaLabel):' in discovery_interface
-    assert 'class MomentActionBadge(QFrame):' in discovery_interface
+    assert 'from client.ui.widgets.toggle_badge import ToggleBadge' in discovery_interface
+    assert 'class MomentActionBadge(QFrame):' not in discovery_interface
     assert 'def _rounded_media_pixmap(pixmap: QPixmap, width: int, height: int, radius: int = 10) -> QPixmap:' in discovery_interface
     assert 'clip.addRoundedRect(target.rect(), radius, radius)' in discovery_interface
     assert 'self._layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)' in discovery_interface
@@ -771,11 +772,15 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
     assert 'menu = RoundMenu(parent=self)' in moment_card_block
     assert 'Action(AppIcon.EDIT, tr("discovery.card.edit_tooltip", "Edit moment"), parent=menu)' in moment_card_block
     assert 'Action(AppIcon.CANCEL_MEDIUM, tr("discovery.card.delete_tooltip", "Delete moment"), parent=menu)' in moment_card_block
-    assert 'self.like_count_badge = MomentActionBadge("", self.action_row)' in moment_card_block
-    assert 'self.like_badge = MomentActionBadge("", self.action_row)' in moment_card_block
-    assert 'self.comment_badge = MomentActionBadge("", self.action_row)' in moment_card_block
+    assert 'self.like_count_badge = ToggleBadge(' in moment_card_block
+    assert 'icon=CollectionIcon("heart")' in moment_card_block
+    assert 'self.like_badge = ToggleBadge(' in moment_card_block
+    assert 'icon=CollectionIcon("thumb_like")' in moment_card_block
+    assert 'self.comment_badge = ToggleBadge(' in moment_card_block
+    assert 'icon=CollectionIcon("comment")' in moment_card_block
     assert 'self.like_badge.clicked.connect(self._toggle_like)' in moment_card_block
     assert 'self.comment_badge.clicked.connect(self._open_comment_editor)' in moment_card_block
+    assert 'self.like_badge.setChecked(self.moment.is_liked)' in moment_card_block
     assert 'self.content_label.setText(self._limited_content_text(text))' in moment_card_block
     assert 'def _limited_content_text(self, text: str) -> str:' in moment_card_block
     assert 'return text[: self.DISPLAY_TEXT_LIMIT].rstrip() + "…"' in moment_card_block
@@ -784,6 +789,42 @@ def test_moment_card_uses_five_row_media_and_badge_layout() -> None:
     assert 'self.layout().insertWidget(2, self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)' in moment_card_block
     assert 'layout.addWidget(self.media_grid, 0, Qt.AlignmentFlag.AlignLeft)' in moment_card_block
     assert 'list(media[:9])' in discovery_interface
+
+
+def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -> None:
+    toggle_badge = Path('client/ui/widgets/toggle_badge.py').read_text(encoding='utf-8')
+    light_qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
+    dark_qss = Path('client/ui/styles/qss/dark/discovery_interface.qss').read_text(encoding='utf-8')
+
+    assert 'class ToggleBadge(QFrame):' in toggle_badge
+    assert 'clicked = Signal()' in toggle_badge
+    assert 'toggled = Signal(bool)' in toggle_badge
+    assert 'hover_enabled: bool = True' in toggle_badge
+    assert 'press_enabled: bool = True' in toggle_badge
+    assert 'show_border: bool = True' in toggle_badge
+    assert 'self.setProperty("checked", self._checked)' in toggle_badge
+    assert 'self.setProperty("pressed", self._pressed)' in toggle_badge
+    assert 'self.setProperty("hoverEnabled", self._hover_enabled)' in toggle_badge
+    assert 'self.setProperty("pressEnabled", self._press_enabled)' in toggle_badge
+    assert 'self.setProperty("borderVisible", self._border_visible)' in toggle_badge
+    assert 'def setBorderVisible(self, visible: bool) -> None:' in toggle_badge
+    assert 'def isBorderVisible(self) -> bool:' in toggle_badge
+    assert 'def setChecked(self, checked: bool) -> None:' in toggle_badge
+    assert 'def isChecked(self) -> bool:' in toggle_badge
+    assert 'def setIcon(' in toggle_badge
+    assert 'def setIconSize(' in toggle_badge
+    assert 'def sizeHint(self) -> QSize:' in toggle_badge
+    assert 'def minimumSizeHint(self) -> QSize:' in toggle_badge
+    assert 'self.updateGeometry()' in toggle_badge
+    assert 'icon.render(painter, icon_rect, fill=self._badge._icon_color())' in toggle_badge
+    assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in light_qss
+    assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in light_qss
+    assert 'QFrame#ToggleBadge[checked="true"]' in light_qss
+    assert 'QFrame#ToggleBadge[borderVisible="false"]' in light_qss
+    assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in dark_qss
+    assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in dark_qss
+    assert 'QFrame#ToggleBadge[checked="true"]' in dark_qss
+    assert 'QFrame#ToggleBadge[borderVisible="false"]' in dark_qss
 
 
 def test_discovery_redesign_i18n_resources_are_localized() -> None:

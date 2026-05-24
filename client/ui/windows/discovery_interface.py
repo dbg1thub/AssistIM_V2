@@ -49,7 +49,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from client.core.app_icons import AppIcon
+from client.core.app_icons import AppIcon, CollectionIcon
 from client.core import logging
 from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
@@ -80,6 +80,7 @@ from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.image_viewer import ImageViewer
 from client.ui.widgets.static_card_frame import StaticCardFrame
+from client.ui.widgets.toggle_badge import ToggleBadge
 
 
 setup_logging()
@@ -1602,51 +1603,6 @@ class EditMomentDialog(CreateMomentDialog):
         self.accept()
 
 
-class MomentActionBadge(QFrame):
-    """Small pill action used by moment interaction rows."""
-
-    clicked = Signal()
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(parent)
-        self.setObjectName("MomentActionBadge")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setProperty("pressed", False)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setSpacing(4)
-
-        self.text_label = CaptionLabel(text, self)
-        self.text_label.setObjectName("MomentActionBadgeText")
-        layout.addWidget(self.text_label)
-
-    def setText(self, text: str) -> None:
-        self.text_label.setText(str(text or ""))
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setProperty("pressed", True)
-            self.style().unpolish(self)
-            self.style().polish(self)
-            self.update()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        was_pressed = bool(self.property("pressed"))
-        self.setProperty("pressed", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
-        if was_pressed and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
 class MomentCard(QWidget):
     """Single moment card in the timeline."""
 
@@ -1703,8 +1659,14 @@ class MomentCard(QWidget):
         header_actions_layout = QHBoxLayout(header_actions)
         header_actions_layout.setContentsMargins(0, 0, 0, 0)
         header_actions_layout.setSpacing(8)
-        self.header_badge = MomentActionBadge(tr("discovery.card.badge_placeholder", "Moment"), header_actions)
-        self.header_badge.setObjectName("MomentHeaderBadge")
+        self.header_badge = ToggleBadge(
+            tr("discovery.card.badge_placeholder", "Moment"),
+            parent=header_actions,
+            checkable=False,
+            hover_enabled=False,
+            press_enabled=False,
+        )
+        self.header_badge.setCursor(Qt.CursorShape.ArrowCursor)
         self.more_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, self.header_row)
         self.more_button.setToolTip(tr("discovery.card.more_tooltip", "More"))
         self.more_button.clicked.connect(self._show_more_menu)
@@ -1744,13 +1706,30 @@ class MomentCard(QWidget):
         like_layout = QHBoxLayout(like_area)
         like_layout.setContentsMargins(0, 0, 0, 0)
         like_layout.setSpacing(6)
-        self.like_count_badge = MomentActionBadge("", self.action_row)
-        self.like_badge = MomentActionBadge("", self.action_row)
+        self.like_count_badge = ToggleBadge(
+            "",
+            icon=CollectionIcon("heart"),
+            parent=self.action_row,
+            checkable=False,
+            hover_enabled=False,
+            press_enabled=False,
+        )
+        self.like_count_badge.setCursor(Qt.CursorShape.ArrowCursor)
+        self.like_badge = ToggleBadge(
+            "",
+            icon=CollectionIcon("thumb_like"),
+            parent=self.action_row,
+        )
         self.like_badge.clicked.connect(self._toggle_like)
         like_layout.addWidget(self.like_count_badge)
         like_layout.addWidget(self.like_badge)
 
-        self.comment_badge = MomentActionBadge("", self.action_row)
+        self.comment_badge = ToggleBadge(
+            "",
+            icon=CollectionIcon("comment"),
+            parent=self.action_row,
+            checkable=False,
+        )
         self.comment_badge.clicked.connect(self._open_comment_editor)
         action_row_layout.addWidget(like_area, 0)
         action_row_layout.addStretch(1)
@@ -1810,6 +1789,7 @@ class MomentCard(QWidget):
         )
         self.like_count_badge.setText(str(max(0, self.moment.like_count)))
         self.like_badge.setText(like_prefix)
+        self.like_badge.setChecked(self.moment.is_liked)
         comment_prefix = tr("discovery.card.comment", "Comment")
         self.comment_badge.setText(
             f"{comment_prefix} {self.moment.comment_count}" if self.moment.comment_count else comment_prefix

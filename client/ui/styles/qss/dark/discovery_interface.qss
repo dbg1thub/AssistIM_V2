@@ -191,24 +191,45 @@ QLabel#momentVideoCard {
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QFrame#MomentActionBadge {
+QFrame#ToggleBadge {
     background: {{SURFACE_BG}};
     border: 1px solid {{BORDER_COLOR}};
     border-radius: 10px;
 }
 
-QFrame#MomentActionBadge:hover {
+QFrame#ToggleBadge[hoverEnabled="true"]:hover {
     background: {{CARD_BG_STRONG}};
     border: 1px solid {{BORDER_COLOR_STRONG}};
 }
 
-QFrame#MomentActionBadge[pressed="true"] {
+QFrame#ToggleBadge[pressEnabled="true"][pressed="true"] {
     background: {{BORDER_COLOR}};
 }
 
-QLabel#MomentActionBadgeText {
+QFrame#ToggleBadge[checked="true"] {
+    background: rgba(127, 29, 29, 0.30);
+    border: 1px solid rgba(248, 113, 113, 0.42);
+}
+
+QFrame#ToggleBadge[checked="true"][hoverEnabled="true"]:hover {
+    background: rgba(153, 27, 27, 0.36);
+    border: 1px solid rgba(252, 165, 165, 0.50);
+}
+
+QFrame#ToggleBadge[borderVisible="false"],
+QFrame#ToggleBadge[borderVisible="false"][hoverEnabled="true"]:hover,
+QFrame#ToggleBadge[borderVisible="false"][pressEnabled="true"][pressed="true"],
+QFrame#ToggleBadge[borderVisible="false"][checked="true"] {
+    border: none;
+}
+
+QLabel#ToggleBadgeText {
     color: {{TEXT_SECONDARY}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QFrame#ToggleBadge[checked="true"] QLabel#ToggleBadgeText {
+    color: rgb(252, 165, 165);
 }
 
 QAbstractScrollArea {
