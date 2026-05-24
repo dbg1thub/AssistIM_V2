@@ -20,7 +20,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -1004,55 +1004,34 @@ class ContactDetailPanel(QWidget):
         root_layout.setSpacing(0)
         root_layout.addStretch(1)
 
-        self.card_stack = AnimatedStackWidget(self)
-        self.card_stack.setObjectName("contactDetailCardStack")
-        self.card_stack.setMinimumWidth(420)
-        self.card_stack.setMaximumWidth(460)
-        self.card_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self._cards = [ContactDetailCard(self.card_stack), ContactDetailCard(self.card_stack)]
-        self._active_card = self._cards[0]
-        for card in self._cards:
-            self.card_stack.addWidget(card)
-            card.message_requested.connect(self.message_requested.emit)
-            card.call_requested.connect(self.call_requested.emit)
-            card.remark_edit_requested.connect(self.remark_edit_requested.emit)
-            card.friend_moments_requested.connect(self.friend_moments_requested.emit)
-            card.detail_more_requested.connect(self.detail_more_requested.emit)
-        self.card_stack.setCurrentWidget(self._active_card)
+        self.card = ContactDetailCard(self)
+        self.card.message_requested.connect(self.message_requested.emit)
+        self.card.call_requested.connect(self.call_requested.emit)
+        self.card.remark_edit_requested.connect(self.remark_edit_requested.emit)
+        self.card.friend_moments_requested.connect(self.friend_moments_requested.emit)
+        self.card.detail_more_requested.connect(self.detail_more_requested.emit)
 
-        root_layout.addWidget(self.card_stack, 0, Qt.AlignmentFlag.AlignHCenter)
+        root_layout.addWidget(self.card, 0, Qt.AlignmentFlag.AlignHCenter)
         root_layout.addStretch(1)
         self.show_placeholder()
 
-    def _inactive_card(self) -> ContactDetailCard:
-        return self._cards[1] if self._active_card is self._cards[0] else self._cards[0]
-
-    def _switch_to_card(self, target_card: ContactDetailCard) -> None:
-        self._active_card = target_card
-        self.card_stack.slide_to_widget(target_card, direction="right")
-
     def show_placeholder(self) -> None:
-        self._active_card.show_placeholder()
+        self.card.show_placeholder()
 
     def set_contact(self, contact: ContactRecord) -> None:
-        if self._active_card.entity_key() == ("friend", contact.id):
-            self._active_card.set_contact(contact)
-            return
-        target_card = self._inactive_card() if self.isVisible() else self._active_card
-        target_card.set_contact(contact)
-        self._switch_to_card(target_card)
+        self.card.set_contact(contact)
 
     def set_friend_moment_images(self, media: list[MomentMediaRecord]) -> None:
-        self._active_card.set_friend_moment_images(media)
+        self.card.set_friend_moment_images(media)
 
     def set_blocked_contact(self, contact: ContactRecord) -> None:
-        self._active_card.set_blocked_contact(contact)
+        self.card.set_blocked_contact(contact)
 
     def set_group(self, group: GroupRecord) -> None:
-        self._active_card.set_group(group)
+        self.card.set_group(group)
 
     def set_request(self, request: FriendRequestRecord, current_user_id: str = "") -> None:
-        self._active_card.set_request(request, current_user_id)
+        self.card.set_request(request, current_user_id)
 
 
 class FriendMomentsDialog(FluentDialog):
@@ -1874,7 +1853,7 @@ class ContactInterface(QWidget):
         self.segmented.addItem("blocked", tr("contact.sidebar.tab.blocked", "Blocked"), lambda: self._switch_page("blocked"))
         self.segmented.setMinimumHeight(36)
 
-        self.page_stack = AnimatedStackWidget(sidebar)
+        self.page_stack = QStackedWidget(sidebar)
         self.friends_page, self.friends_container, self.friends_layout = self._create_scroll_page()
         self.groups_page, self.groups_container, self.groups_layout = self._create_scroll_page()
         self.requests_page, self.requests_container, self.requests_layout = self._create_scroll_page()
@@ -1901,7 +1880,7 @@ class ContactInterface(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(sidebar)
 
-        self.detail_stack = AnimatedStackWidget(self)
+        self.detail_stack = QStackedWidget(self)
         self.detail_stack.setObjectName("contactDetailStack")
         self.welcome_panel = ContactWelcomeWidget(self.detail_stack)
         self.detail_panel = ContactDetailPanel(self.detail_stack)
@@ -1952,10 +1931,10 @@ class ContactInterface(QWidget):
         return area, container, layout
 
     def _show_welcome_panel(self) -> None:
-        self.detail_stack.slide_to_widget(self.welcome_panel, direction="right")
+        self.detail_stack.setCurrentWidget(self.welcome_panel)
 
     def _show_detail_panel(self) -> None:
-        self.detail_stack.slide_to_widget(self.detail_panel, direction="right")
+        self.detail_stack.setCurrentWidget(self.detail_panel)
 
     def _activate_page(self, key: str) -> None:
         self._current_page = key
@@ -1966,7 +1945,7 @@ class ContactInterface(QWidget):
             "requests": self.requests_page,
             "blocked": self.blocked_page,
         }[key]
-        self.page_stack.slide_to_widget(target, direction="right")
+        self.page_stack.setCurrentWidget(target)
 
     def _switch_page(self, key: str) -> None:
         if key != self._current_page:

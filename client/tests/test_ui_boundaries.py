@@ -322,11 +322,12 @@ def test_contact_detail_panel_only_opens_for_friend_items() -> None:
     detail_card_block = contact_interface.split('class ContactDetailCard(StaticCardFrame):', 1)[1].split('class UserSearchItem', 1)[0]
     assert 'self.setBorderRadius(8)' not in detail_card_block
     assert 'class ContactDetailPanel(QWidget):' in contact_interface
-    assert 'self.card_stack = AnimatedStackWidget(self)' in detail_panel_block
-    assert 'self._cards = [ContactDetailCard(self.card_stack), ContactDetailCard(self.card_stack)]' in detail_panel_block
-    assert 'if self._active_card.entity_key() == ("friend", contact.id):' in detail_panel_block
-    assert 'target_card.set_contact(contact)' in detail_panel_block
-    assert 'self.card_stack.slide_to_widget(target_card, direction="right")' in detail_panel_block
+    assert 'self.card = ContactDetailCard(self)' in detail_panel_block
+    assert 'self.card_stack' not in detail_panel_block
+    assert 'self._cards' not in detail_panel_block
+    assert 'self._active_card' not in detail_panel_block
+    assert 'slide_to_widget' not in detail_panel_block
+    assert 'self.card.set_contact(contact)' in detail_panel_block
     assert 'self.detail_panel.set_contact(selected)' in select_friend_block
     assert 'self._show_detail_panel()' in select_friend_block
     for block in (select_group_block, select_request_block, select_blocked_block):
@@ -1967,14 +1968,15 @@ def test_message_delegate_paint_hot_path_caches_avatar_and_media_sources() -> No
 def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
-    assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in contact_interface
-    assert 'self.page_stack = AnimatedStackWidget(sidebar)' in contact_interface
-    assert 'self.detail_stack = AnimatedStackWidget(self)' in contact_interface
-    assert 'self.page_stack = QStackedWidget(sidebar)' not in contact_interface
-    assert 'self.detail_stack = QStackedWidget(self)' not in contact_interface
-    assert 'self.detail_stack.slide_to_widget(self.welcome_panel, direction="right")' in contact_interface
-    assert 'self.detail_stack.slide_to_widget(self.detail_panel, direction="right")' in contact_interface
-    assert 'self.page_stack.slide_to_widget(target, direction="right")' in contact_interface
+    main_interface_block = contact_interface.split('class ContactInterface(QWidget):', 1)[1]
+    assert 'self.page_stack = QStackedWidget(sidebar)' in main_interface_block
+    assert 'self.detail_stack = QStackedWidget(self)' in main_interface_block
+    assert 'self.page_stack = AnimatedStackWidget(sidebar)' not in main_interface_block
+    assert 'self.detail_stack = AnimatedStackWidget(self)' not in main_interface_block
+    assert 'self.detail_stack.setCurrentWidget(self.welcome_panel)' in main_interface_block
+    assert 'self.detail_stack.setCurrentWidget(self.detail_panel)' in main_interface_block
+    assert 'self.page_stack.setCurrentWidget(target)' in main_interface_block
+    assert 'slide_to_widget' not in main_interface_block
     assert 'if reason == "user_profile_update":' in contact_interface
     assert 'if reason == "group_profile_update":' in contact_interface
     assert 'if reason == "group_self_profile_update":' in contact_interface
