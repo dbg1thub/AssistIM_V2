@@ -983,11 +983,38 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
 
     assert 'class FriendMomentsDialog(FluentDialog):' in contact_interface
     assert 'class FluentDialogTitleButton(TitleBarButton):' in fluent_dialog
+    assert 'class FluentDialogWindowButton(TitleBarButton):' in fluent_dialog
+    assert 'QSvgRenderer(self._close_svg_dom.toByteArray())' in fluent_dialog
+    assert 'painter.drawLine(18, 16, 28, 16)' in fluent_dialog
+    assert 'r = self.devicePixelRatioF()' in fluent_dialog
+    assert 'painter.scale(1 / r, 1 / r)' in fluent_dialog
+    assert 'painter.drawRect(int(18 * r), int(11 * r), int(10 * r), int(10 * r))' in fluent_dialog
+    window_button_block = fluent_dialog.split('class FluentDialogWindowButton(TitleBarButton):', 1)[1].split(
+        'class FluentDialogTitleButton',
+        1,
+    )[0]
+    assert 'painter.drawLine(18, 11, 28, 21)' not in window_button_block
+    assert 'painter.drawLine(28, 11, 18, 21)' not in window_button_block
+    assert 'def setMinimizeButtonVisible(self, visible: bool) -> None:' in fluent_dialog
+    assert 'def setMaximizeButtonVisible(self, visible: bool) -> None:' in fluent_dialog
+    assert 'def setCloseButtonVisible(self, visible: bool) -> None:' in fluent_dialog
+    assert 'self.minimize_button.setVisible(False)' in fluent_dialog
+    assert 'self.maximize_button.setVisible(False)' in fluent_dialog
+    assert 'self.close_button.setVisible(True)' in fluent_dialog
+    assert 'def _sync_title_bar_layout(self) -> None:' in fluent_dialog
+    assert 'def _sync_title_button_corners(self) -> None:' in fluent_dialog
+    assert 'button.setCorner("left")' in fluent_dialog
+    assert 'button.setCorner("right")' in fluent_dialog
+    assert 'button_center_y = self._visible_title_button_center_y()' in fluent_dialog
     assert 'def add_title_left_button(' in fluent_dialog
     assert 'def add_title_right_button(' in fluent_dialog
     assert 'path_factory: Callable[[QRectF], QPainterPath]' in fluent_dialog
-    assert 'pen = QPen(color, 1)' in fluent_dialog
+    assert 'icon_size: QSize | None = None' in fluent_dialog
+    assert 'pen_width: float = 1.0' in fluent_dialog
+    assert 'pen = QPen(color, self._pen_width)' in fluent_dialog
     assert 'pen.setCosmetic(True)' in fluent_dialog
+    assert 'RoundCap' not in fluent_dialog
+    assert 'RoundJoin' not in fluent_dialog
     assert 'self._title_buttons.append(button)' in fluent_dialog
     assert 'self._sync_title_button_colors(text_color)' in fluent_dialog
     assert 'super().__init__(parent=parent, title="")' in contact_interface
@@ -999,11 +1026,11 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'tr("contact.friend_moments.empty_placeholder", "Friend moments will be shown here.")' in contact_interface
     assert 'self.setFixedWidth(self.DIALOG_WIDTH)' in contact_interface
     assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in contact_interface
-    assert 'self.minimize_button = self.add_title_right_button(' in contact_interface
-    assert 'self._title_icon_minimize_path' in contact_interface
+    assert 'self.setMinimizeButtonVisible(True)' in contact_interface
+    assert 'self.minimize_button = self.add_title_right_button(' not in contact_interface
+    assert 'self._title_icon_minimize_path' not in contact_interface
     assert 'self.back_button = self.add_title_left_button(' in contact_interface
     assert 'self._title_icon_back_path' in contact_interface
-    assert 'corner="left"' in contact_interface
     assert 'self.page_stack: AnimatedStackWidget | None = None' in contact_interface
     assert 'self.page_stack = AnimatedStackWidget(self.content_widget)' in contact_interface
     assert 'self.page_stack = QStackedWidget(self.content_widget)' not in contact_interface
@@ -1015,19 +1042,27 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'self._title_icon_add_path' in contact_interface
     assert 'self.refresh_moments_button = self.add_title_left_button(' in contact_interface
     assert 'self._title_icon_refresh_path' in contact_interface
+    assert 'icon_size=QSize(14, 14)' in contact_interface
+    assert 'icon_size=QSize(16, 16)' not in contact_interface
+    assert 'pen_width=1.4' in contact_interface
     assert 'def _title_icon_back_path(rect: QRectF) -> QPainterPath:' in contact_interface
     assert 'def _title_icon_alert_path(rect: QRectF) -> QPainterPath:' in contact_interface
     assert 'def _title_icon_add_path(rect: QRectF) -> QPainterPath:' in contact_interface
     assert 'def _title_icon_refresh_path(rect: QRectF) -> QPainterPath:' in contact_interface
-    assert 'def _title_icon_minimize_path(rect: QRectF) -> QPainterPath:' in contact_interface
+    back_path_block = contact_interface.split('def _title_icon_back_path(rect: QRectF) -> QPainterPath:', 1)[1].split(
+        'def _title_icon_alert_path',
+        1,
+    )[0]
+    assert 'path.moveTo(rect.right() - 2, rect.center().y())' in back_path_block
+    assert 'path.moveTo(rect.left() + 6, rect.top() + 3)' in back_path_block
     friend_dialog_block = contact_interface.split('class FriendMomentsDialog(FluentDialog):', 1)[1].split('class UserSearchItem', 1)[0]
+    assert 'corner="left"' not in friend_dialog_block
     assert 'Qt.AlignmentFlag.AlignVCenter' not in friend_dialog_block
     assert 'TitleLabel(' not in friend_dialog_block
     assert 'FriendMomentsTitleIconButton' not in contact_interface
     assert 'FriendMomentsBackButton' not in contact_interface
     assert 'FluentIcon.RETURN' not in contact_interface
     assert 'drawIcon(' not in contact_interface
-    assert 'MinimizeButton(self.title_bar)' not in contact_interface
     assert 'PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(CollectionIcon("alert"), self.title_bar)' not in contact_interface
     assert 'TransparentToolButton(AppIcon.SYNC, self.title_bar)' not in contact_interface
@@ -1035,6 +1070,7 @@ def test_contact_friend_moments_entry_opens_owned_placeholder_dialog() -> None:
     assert 'is_my_moments = self.page_stack is not None and self.page_stack.currentWidget() is self.my_moments_page' in contact_interface
     assert 'self.back_button.setVisible(not is_my_moments)' in contact_interface
     assert 'button.setVisible(is_my_moments)' in contact_interface
+    assert 'self._sync_title_bar_layout()' in contact_interface
     assert 'def _switch_to_my_moments(self) -> None:' in contact_interface
     assert 'self.page_stack.slide_to_widget(self.my_moments_page, direction="right")' in contact_interface
     assert 'def _animate_page_transition' not in friend_dialog_block
@@ -1813,22 +1849,27 @@ def test_fluent_dialog_title_is_centered() -> None:
     dialog = Path('client/ui/widgets/fluent_dialog.py').read_text(encoding='utf-8')
 
     assert 'self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)' in dialog
-    assert 'title_layout.addWidget(self.title_left_spacer, 0)' in dialog
+    assert 'title_layout.addWidget(self.title_left_balance, 0)' in dialog
     assert 'title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in dialog
+    assert 'title_layout.addWidget(self.title_right_balance, 0)' in dialog
+    assert 'title_layout.addWidget(self.minimize_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
+    assert 'title_layout.addWidget(self.maximize_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
     assert 'title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
     assert 'title_font.setPixelSize(15)' in dialog
     assert 'title_font.setBold(False)' in dialog
-    assert 'def _sync_title_left_spacer_width(self) -> None:' in dialog
-    assert 'def _sync_title_label_to_close_button(self) -> None:' in dialog
-    assert 'width = self.close_button.width() if self.close_button.width() > 0 else self.CLOSE_BUTTON_WIDTH' in dialog
-    assert 'self.title_left_spacer.setFixedWidth(width)' in dialog
-    assert 'close_center_y = self.close_button.geometry().center().y()' in dialog
+    assert 'def _sync_title_bar_layout(self) -> None:' in dialog
+    assert 'left_width = self._visible_button_width(self._left_title_buttons)' in dialog
+    assert 'right_width = self._visible_button_width(self._right_title_buttons + self._default_title_buttons)' in dialog
+    assert 'self.title_left_balance.setFixedWidth(max(0, right_width - left_width))' in dialog
+    assert 'self.title_right_balance.setFixedWidth(max(0, left_width - right_width))' in dialog
+    assert 'def _sync_title_label_vertical_alignment(self) -> None:' in dialog
+    assert 'button_center_y = self._visible_title_button_center_y()' in dialog
     assert 'self.title_label.move(self.title_label.x(), label_y)' in dialog
     assert 'self.close_button.setFixedSize(' not in dialog
     assert 'sizeHint().width()' not in dialog
     assert 'sizeHint().height()' not in dialog
-    assert 'self._sync_title_left_spacer_width()' in dialog
-    assert 'QTimer.singleShot(0, self._sync_title_label_to_close_button)' in dialog
+    assert 'self._sync_title_bar_layout()' in dialog
+    assert 'QTimer.singleShot(0, self._sync_title_bar_layout)' in dialog
 
 
 def test_fluent_exec_dialogs_cache_payload_before_accepting() -> None:

@@ -85,12 +85,16 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     assert dialog_source_path.exists()
     dialog_source = dialog_source_path.read_text(encoding="utf-8")
     assert "class FluentDialog(QDialog):" in dialog_source
-    assert "CloseButton" in dialog_source
-    assert "class FluentDialogCloseButton(CloseButton):" in dialog_source
-    assert "self.close_button = FluentDialogCloseButton" in dialog_source
+    assert "class FluentDialogWindowButton(TitleBarButton):" in dialog_source
+    assert "QSvgRenderer(self._close_svg_dom.toByteArray())" in dialog_source
+    assert "painter.drawLine(18, 16, 28, 16)" in dialog_source
+    assert "painter.scale(1 / r, 1 / r)" in dialog_source
+    assert 'self.close_button = FluentDialogWindowButton("close", self.title_bar, corner_radius=self._radius)' in dialog_source
+    assert 'self.minimize_button = FluentDialogWindowButton("minimize", self.title_bar, corner_radius=self._radius)' in dialog_source
+    assert 'self.maximize_button = FluentDialogWindowButton("maximize", self.title_bar, corner_radius=self._radius)' in dialog_source
     assert "self.close_button = CloseButton" not in dialog_source
     assert "painter.drawPath" in dialog_source
-    assert "drawRect(self.rect())" not in dialog_source
+    assert "painter.drawRect(self.rect())" not in dialog_source
     assert "def setWindowTitle(self, title: str) -> None:" in dialog_source
     assert "TransparentToolButton" not in dialog_source
     assert "QGraphicsDropShadowEffect" not in dialog_source

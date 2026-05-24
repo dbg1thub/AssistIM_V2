@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QPoint,
     QRect,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -1052,7 +1053,6 @@ class FriendMomentsDialog(FluentDialog):
         self.friend_moments_page: QWidget | None = None
         self.my_moments_page: QWidget | None = None
         self.back_button: FluentDialogTitleButton | None = None
-        self.minimize_button: FluentDialogTitleButton | None = None
         self.notify_button: FluentDialogTitleButton | None = None
         self.publish_moment_button: FluentDialogTitleButton | None = None
         self.refresh_moments_button: FluentDialogTitleButton | None = None
@@ -1067,34 +1067,36 @@ class FriendMomentsDialog(FluentDialog):
         self.title_bar.setMouseTracking(True)
         self.content_widget.setMouseTracking(True)
         self.content_widget.installEventFilter(self)
+        self.setMinimizeButtonVisible(True)
 
         self.back_button = self.add_title_left_button(
             self._title_icon_back_path,
-            corner="left",
             tooltip=tr("common.back", "Back"),
             on_clicked=self._switch_to_my_moments,
             object_name="friendMomentsBackButton",
+            icon_size=QSize(14, 14),
+            pen_width=1.4,
         )
         self.notify_button = self.add_title_left_button(
             self._title_icon_alert_path,
             tooltip=tr("discovery.notifications.button", "Notifications"),
             object_name="friendMomentsNotifyButton",
+            icon_size=QSize(14, 14),
+            pen_width=1.4,
         )
         self.publish_moment_button = self.add_title_left_button(
             self._title_icon_add_path,
             tooltip=tr("discovery.feed.publish_button", "Publish Moment"),
             object_name="friendMomentsPublishButton",
+            icon_size=QSize(14, 14),
+            pen_width=1.4,
         )
         self.refresh_moments_button = self.add_title_left_button(
             self._title_icon_refresh_path,
             tooltip=tr("discovery.feed.refresh_tooltip", "Refresh feed"),
             object_name="friendMomentsRefreshButton",
-        )
-        self.minimize_button = self.add_title_right_button(
-            self._title_icon_minimize_path,
-            tooltip=tr("common.minimize", "Minimize"),
-            on_clicked=self.showMinimized,
-            object_name="friendMomentsMinimizeButton",
+            icon_size=QSize(14, 14),
+            pen_width=1.4,
         )
 
         root = self.content_layout
@@ -1165,9 +1167,11 @@ class FriendMomentsDialog(FluentDialog):
     @staticmethod
     def _title_icon_back_path(rect: QRectF) -> QPainterPath:
         path = QPainterPath()
-        path.moveTo(rect.right() - 2, rect.top() + 2)
-        path.lineTo(rect.left() + 2, rect.center().y())
-        path.lineTo(rect.right() - 2, rect.bottom() - 2)
+        path.moveTo(rect.right() - 2, rect.center().y())
+        path.lineTo(rect.left() + 3, rect.center().y())
+        path.moveTo(rect.left() + 6, rect.top() + 3)
+        path.lineTo(rect.left() + 3, rect.center().y())
+        path.lineTo(rect.left() + 6, rect.bottom() - 3)
         return path
 
     @staticmethod
@@ -1200,13 +1204,6 @@ class FriendMomentsDialog(FluentDialog):
         path.moveTo(rect.right() - 2.5, rect.top() + 2.5)
         path.lineTo(rect.right() - 1, rect.top() + 5.5)
         path.lineTo(rect.right() - 4.2, rect.top() + 4.8)
-        return path
-
-    @staticmethod
-    def _title_icon_minimize_path(rect: QRectF) -> QPainterPath:
-        path = QPainterPath()
-        path.moveTo(rect.left() + 1, rect.center().y())
-        path.lineTo(rect.right() - 1, rect.center().y())
         return path
 
     def _create_friend_moments_page(self) -> QWidget:
@@ -1258,6 +1255,7 @@ class FriendMomentsDialog(FluentDialog):
         for button in (self.notify_button, self.publish_moment_button, self.refresh_moments_button):
             if button is not None:
                 button.setVisible(is_my_moments)
+        self._sync_title_bar_layout()
 
     def _handle_vertical_resize_event(self, watched: QWidget, event) -> bool:
         if not hasattr(event, "position"):
