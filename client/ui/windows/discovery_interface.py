@@ -35,6 +35,8 @@ from qfluentwidgets import (
     ComboBox,
     IconWidget,
     InfoBar,
+    InfoBadge,
+    InfoLevel,
     isDarkTheme,
     LineEdit,
     MessageBoxBase,
@@ -80,6 +82,11 @@ from client.ui.widgets.animated_stack import AnimatedStackWidget
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
+from client.ui.widgets.fluent_scrollbar import (
+    FluentOverlayScrollBar,
+    FluentOverlayScrollBarDisplayMode,
+    attach_fluent_scrollbar,
+)
 from client.ui.widgets.image_viewer import ImageViewer
 from client.ui.widgets.static_card_frame import StaticCardFrame
 from client.ui.widgets.toggle_badge import ToggleBadge
@@ -1995,8 +2002,8 @@ class MomentsNavItem(QFrame):
         self.text_label.setObjectName("momentsNavItemText")
         layout.addWidget(self.text_label, 1)
 
-        self.badge_label = CaptionLabel(badge_text, self)
-        self.badge_label.setObjectName("momentsNavBadge")
+        badge_value = str(badge_text or "").strip()
+        self.badge_label = InfoBadge(badge_value, self, InfoLevel.ERROR)
         self.badge_label.setVisible(bool(str(badge_text or "").strip()))
         layout.addWidget(self.badge_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -2308,6 +2315,7 @@ class MomentsFeedList(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("MomentsFeedList")
+        self._feed_scrollbar: FluentOverlayScrollBar | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2318,6 +2326,15 @@ class MomentsFeedList(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         _prepare_transparent_scroll_area(self.scroll_area)
+        if hasattr(self.scroll_area, "scrollDelagate") and self.scroll_area.scrollDelagate is not None:
+            self.scroll_area.scrollDelagate.vScrollBar.setForceHidden(True)
+            self.scroll_area.scrollDelagate.hScrollBar.setForceHidden(True)
+            if self.scroll_area.viewport() is not None:
+                self.scroll_area.viewport().removeEventFilter(self.scroll_area.scrollDelagate)
+        self._feed_scrollbar = attach_fluent_scrollbar(
+            self.scroll_area,
+            mode=FluentOverlayScrollBarDisplayMode.ON_HOVER,
+        )
         if self.scroll_area.viewport() is not None:
             self.scroll_area.viewport().setObjectName("discoveryViewport")
 

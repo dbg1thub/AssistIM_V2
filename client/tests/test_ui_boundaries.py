@@ -240,10 +240,15 @@ def test_message_status_badges_only_show_stable_states_with_larger_icons() -> No
     assert 'STATUS_BADGE_ICON_SIZE = 10' in message_delegate
     assert 'self.STATUS_BADGE_ICON_SIZE' in message_delegate
     assert 'def _draw_status_glyph(self, painter: QPainter, rect: QRectF, status_kind: str) -> None:' in message_delegate
-    assert 'AppIcon.CHECK.render(painter, rect, fill="#ffffff")' in message_delegate
-    assert 'AppIcon.CLOSE.render(painter, rect, fill="#ffffff")' in message_delegate
-    assert 'AppIcon.ARROW_SORT_UP.render(painter, rect, fill="#ffffff")' in message_delegate
-    assert 'AppIcon.WARNING.render(painter, rect, fill="#ffffff")' in message_delegate
+    assert 'def _status_badge_foreground_color(self) -> QColor:' in message_delegate
+    assert 'return QColor(0, 0, 0) if self._is_dark else QColor(255, 255, 255)' in message_delegate
+    assert 'foreground = self._status_badge_foreground_color()' in message_delegate
+    assert 'foreground_name = foreground.name(QColor.NameFormat.HexRgb)' in message_delegate
+    assert 'AppIcon.CHECK.render(painter, rect, fill=foreground_name)' in message_delegate
+    assert 'AppIcon.CLOSE.render(painter, rect, fill=foreground_name)' in message_delegate
+    assert 'AppIcon.ARROW_SORT_UP.render(painter, rect, fill=foreground_name)' in message_delegate
+    assert 'AppIcon.WARNING.render(painter, rect, fill=foreground_name)' in message_delegate
+    assert 'fill="#ffffff"' not in message_delegate
     assert 'status_kind == "check"' in message_delegate
     assert 'status_kind == "close"' in message_delegate
     assert 'status_kind == "sent"' in message_delegate
@@ -253,6 +258,8 @@ def test_message_status_badges_only_show_stable_states_with_larger_icons() -> No
     assert 'MessageStatus.DELIVERED' in status_block
     assert 'MessageStatus.READ' in status_block
     assert 'MessageStatus.FAILED' in status_block
+    assert 'warning_color = QColor(255, 244, 206) if dark else QColor(157, 93, 0)' in status_block
+    assert 'return warning_color, "warning"' in status_block
     assert 'AppIcon.' not in status_block
     assert 'MessageStatus.PENDING' not in status_block
     assert 'MessageStatus.SENDING' not in status_block
@@ -534,6 +541,9 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'current_end = QPoint(width, 0) if direction == "right" else QPoint(-width, 0)' in animated_stack
     assert 'from client.ui.widgets.animated_stack import AnimatedStackWidget' in discovery_interface
     assert 'from client.ui.widgets.fluent_splitter import FluentSplitter' in discovery_interface
+    assert 'from client.ui.widgets.fluent_scrollbar import (' in discovery_interface
+    assert 'FluentOverlayScrollBarDisplayMode' in discovery_interface
+    assert 'attach_fluent_scrollbar' in discovery_interface
     assert 'MOMENTS_PANEL_CONTENT_MARGIN = 12' in discovery_interface
     assert 'MOMENTS_PANEL_CONTENT_SPACING = 12' in discovery_interface
     assert 'class MomentsLeftPanel(QWidget):' in discovery_interface
@@ -712,6 +722,11 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'self.feed_stack.addWidget(self.all_feed_list)' in feed_page_block
     assert 'self.feed_stack.addWidget(self.media_page)' in feed_page_block
     assert 'self.feed_stack.addWidget(self.links_page)' in feed_page_block
+    assert 'self._feed_scrollbar: FluentOverlayScrollBar | None = None' in discovery_interface
+    assert 'self.scroll_area.scrollDelagate.vScrollBar.setForceHidden(True)' in discovery_interface
+    assert 'self.scroll_area.viewport().removeEventFilter(self.scroll_area.scrollDelagate)' in discovery_interface
+    assert 'self._feed_scrollbar = attach_fluent_scrollbar(' in discovery_interface
+    assert 'mode=FluentOverlayScrollBarDisplayMode.ON_HOVER' in discovery_interface
     assert 'self.toolbar.filter_changed.connect(self.switch_filter)' in feed_page_block
     assert 'self.feed_stack.slide_to_widget(target, direction="right")' in feed_page_block
     assert 'icon=AppIcon.HOME' not in discovery_interface
@@ -732,7 +747,10 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'QFrame#MomentsNavItem:hover' in qss
     assert 'border-radius: 0px;' in qss
     assert 'QFrame#MomentsNavItem[active="true"] QLabel#momentsNavItemText' not in qss
-    assert 'QLabel#momentsNavBadge {\n    background: {{SURFACE_BG}};\n    color: {{TEXT_PRIMARY}};' in qss
+    assert 'InfoBadge' in discovery_interface
+    assert 'InfoLevel.ERROR' in discovery_interface
+    assert 'self.badge_label = InfoBadge(' in discovery_interface
+    assert 'QLabel#momentsNavBadge' not in qss
     assert 'QFrame#MomentsRightSection {\n    border-bottom:' not in qss
     assert 'QListView#MomentsRightListView' in qss
     assert 'QLabel#MomentsRightListItem' not in qss

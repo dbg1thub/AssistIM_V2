@@ -100,14 +100,6 @@ QLabel#momentsNavItemText {
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QLabel#momentsNavBadge {
-    background: {{SURFACE_BG}};
-    color: {{TEXT_PRIMARY}};
-    border: 1px solid {{BORDER_COLOR}};
-    border-radius: 8px;
-    padding: 1px 6px;
-}
-
 QWidget#MomentsFeedToolbar,
 QWidget#MomentsComposeBar {
     background: {{CARD_BG_STRONG}};

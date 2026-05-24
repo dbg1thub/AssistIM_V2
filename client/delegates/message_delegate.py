@@ -1340,7 +1340,7 @@ class MessageDelegate(QStyledItemDelegate):
             badge_path = QPainterPath()
             badge_path.addRoundedRect(QRectF(rect), rect.height() / 2, rect.height() / 2)
             painter.fillPath(badge_path, color)
-            painter.setPen(Qt.GlobalColor.white)
+            painter.setPen(self._status_badge_foreground_color())
             painter.setFont(self._status_count_font())
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, count_text)
             painter.restore()
@@ -1358,17 +1358,23 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _draw_status_glyph(self, painter: QPainter, rect: QRectF, status_kind: str) -> None:
         """Draw the status glyph inside the badge."""
+        foreground = self._status_badge_foreground_color()
+        foreground_name = foreground.name(QColor.NameFormat.HexRgb)
         if status_kind == "check":
-            AppIcon.CHECK.render(painter, rect, fill="#ffffff")
+            AppIcon.CHECK.render(painter, rect, fill=foreground_name)
             return
         if status_kind == "close":
-            AppIcon.CLOSE.render(painter, rect, fill="#ffffff")
+            AppIcon.CLOSE.render(painter, rect, fill=foreground_name)
             return
         if status_kind == "sent":
-            AppIcon.ARROW_SORT_UP.render(painter, rect, fill="#ffffff")
+            AppIcon.ARROW_SORT_UP.render(painter, rect, fill=foreground_name)
             return
         if status_kind == "warning":
-            AppIcon.WARNING.render(painter, rect, fill="#ffffff")
+            AppIcon.WARNING.render(painter, rect, fill=foreground_name)
+
+    def _status_badge_foreground_color(self) -> QColor:
+        """Return the InfoBadge-compatible foreground for status badges."""
+        return QColor(0, 0, 0) if self._is_dark else QColor(255, 255, 255)
 
     def _status_count_font(self) -> QFont:
         """Return the cached compact font used for group read-count pills."""
@@ -1414,12 +1420,13 @@ class MessageDelegate(QStyledItemDelegate):
         dark = self._is_dark
         info_color = QColor(157, 157, 157) if dark else QColor(138, 138, 138)
         success_color = QColor(108, 203, 95) if dark else QColor(15, 123, 15)
+        warning_color = QColor(255, 244, 206) if dark else QColor(157, 93, 0)
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
 
         if self._group_read_count_text(message) and self._group_read_count_complete(message):
             return success_color, "check"
         if message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION:
-            return QColor(230, 178, 62) if dark else QColor(161, 107, 0), "warning"
+            return warning_color, "warning"
         if message.status == MessageStatus.SENT:
             return info_color, "sent"
         if message.status == MessageStatus.DELIVERED:
