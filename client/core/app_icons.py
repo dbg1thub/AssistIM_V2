@@ -23,6 +23,10 @@ _svg_template_cache: dict[str, str] = {}
 _svg_markup_cache: dict[tuple[str, str, str, str], str] = {}
 
 _THEME_ICON_COLOR = {
+    Theme.LIGHT: "#404040",
+    Theme.DARK: "#BFBFBF",
+}
+_QICON_THEME_ICON_COLOR = {
     Theme.LIGHT: "#000000",
     Theme.DARK: "#FFFFFF",
 }
@@ -166,7 +170,8 @@ def _resolve_fill_color(theme=Theme.AUTO, **attributes) -> str:
         return _normalize_color(fill)
 
     resolved_theme = _resolve_theme_mode(theme)
-    return _THEME_ICON_COLOR.get(resolved_theme, _normalize_color(getIconColor(theme)))
+    color_palette = _QICON_THEME_ICON_COLOR if attributes.get("color_role") == "qicon" else _THEME_ICON_COLOR
+    return color_palette.get(resolved_theme, _normalize_color(getIconColor(theme)))
 
 
 def _render_svg_markup(icon_name: str, theme=Theme.AUTO, mode: Any = None, **attributes) -> str:
@@ -329,7 +334,7 @@ class AppIcon(FluentIconBase, Enum):
         from PySide6.QtGui import QIcon
 
         resolved_theme = _resolve_icon_theme(theme, reverse=reverse)
-        return QIcon(_RuntimeSvgIconEngine(self.value, resolved_theme).engine)
+        return QIcon(_RuntimeSvgIconEngine(self.value, resolved_theme, color_role="qicon").engine)
 
 
 class CollectionIcon(FluentIconBase):
@@ -346,4 +351,4 @@ class CollectionIcon(FluentIconBase):
         from PySide6.QtGui import QIcon
 
         resolved_theme = _resolve_icon_theme(theme, reverse=reverse)
-        return QIcon(_RuntimeSvgIconEngine(self.name, resolved_theme).engine)
+        return QIcon(_RuntimeSvgIconEngine(self.name, resolved_theme, color_role="qicon").engine)
