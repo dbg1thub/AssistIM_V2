@@ -14,7 +14,7 @@ from qfluentwidgets import FluentIconBase, Theme, getIconColor
 
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-_ICON_SOURCE_DIR = _WORKSPACE_ROOT / "client" / "resources" / "icons" / "iconfont_51777"
+_ICON_SOURCE_DIR = _WORKSPACE_ROOT / "client" / "resources" / "icons"
 _ICON_MANIFEST_PATH = _ICON_SOURCE_DIR / "manifest.json"
 
 _icon_render_scale = 1.2

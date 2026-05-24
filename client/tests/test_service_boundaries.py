@@ -6095,8 +6095,10 @@ def test_app_icon_paths_point_to_generated_svg_assets() -> None:
     assert people_path.suffix == '.svg'
     assert add_path.is_file()
     assert people_path.is_file()
-    assert 'client/resources/icons/iconfont_51777' in add_path.as_posix()
-    assert 'client/resources/icons/iconfont_51777' in people_path.as_posix()
+    assert 'client/resources/icons' in add_path.as_posix()
+    assert 'client/resources/icons' in people_path.as_posix()
+    assert 'iconfont_51777' not in add_path.as_posix()
+    assert 'iconfont_51777' not in people_path.as_posix()
 
 
 def test_app_icon_render_scale_is_applied_at_runtime() -> None:
@@ -6106,7 +6108,8 @@ def test_app_icon_render_scale_is_applied_at_runtime() -> None:
     try:
         app_icons_module.set_icon_render_scale(1.0)
         raw_path = Path(app_icons_module.AppIcon.ADD.path())
-        assert 'client/resources/icons/iconfont_51777' in raw_path.as_posix()
+        assert 'client/resources/icons' in raw_path.as_posix()
+        assert 'iconfont_51777' not in raw_path.as_posix()
         assert raw_path.name == 'add.svg'
 
         app_icons_module.set_icon_render_scale(1.28)
@@ -6126,7 +6129,8 @@ def test_collection_icon_library_is_downloaded_and_addressable() -> None:
     assert 'group' in available_names
     assert group_path.suffix == '.svg'
     assert group_path.is_file()
-    assert 'client/resources/icons/iconfont_51777' in group_path.as_posix()
+    assert 'client/resources/icons' in group_path.as_posix()
+    assert 'iconfont_51777' not in group_path.as_posix()
 
 
 def test_app_icon_default_theme_colors_are_muted_by_theme() -> None:
