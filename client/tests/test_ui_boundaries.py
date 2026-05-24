@@ -657,6 +657,12 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in compose_bar_block
     assert 'content_layout.setContentsMargins(0, 0, 0, 0)' in right_panel_block
     assert 'content_layout.setSpacing(0)' in right_panel_block
+    assert 'self.scroll_area = ScrollArea(self)' not in right_panel_block
+    assert 'self.scroll_area.setWidget(self.content)' not in right_panel_block
+    assert 'layout.addWidget(self.scroll_area, 1)' not in right_panel_block
+    assert 'self.content = QWidget(self.scroll_area)' not in right_panel_block
+    assert 'self.content = QWidget(self)' in right_panel_block
+    assert 'layout.addWidget(self.content, 0)' in right_panel_block
     assert (
         'card_layout.setContentsMargins(\n'
         '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
@@ -666,6 +672,25 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
         '        )'
     ) in right_panel_block
     assert 'card_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)' in right_panel_block
+    assert 'self.summary_section = self._create_right_section(' in right_panel_block
+    assert 'self.online_friends_section = self._create_right_section(' in right_panel_block
+    assert 'self.hot_topics_section = self._create_right_section(' in right_panel_block
+    assert 'self.people_suggestions_section = self._create_right_section(' in right_panel_block
+    assert 'def _create_right_section(self, title: str, body: QWidget) -> QWidget:' in right_panel_block
+    assert 'header_layout = QHBoxLayout()' in right_panel_block
+    assert 'header_layout.addWidget(title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in right_panel_block
+    assert 'action_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, section)' in right_panel_block
+    assert 'AppIcon.MORE.icon()' not in discovery_interface
+    assert 'layout.addLayout(header_layout)' in right_panel_block
+    assert 'layout.addWidget(body)' in right_panel_block
+    assert 'card = StaticCardFrame(self.content)' in right_panel_block
+    assert 'view = QListView(self.content)' in right_panel_block
+    assert 'model = QStringListModel(items, view)' in right_panel_block
+    assert 'view.setModel(model)' in right_panel_block
+    assert 'items = items[:max_items]' in right_panel_block
+    assert 'view.setFixedHeight(max(1, len(items)) * 28)' in right_panel_block
+    assert 'view.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)' in right_panel_block
+    assert 'content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL, left_inset=0, right_inset=0))' in right_panel_block
     assert (
         'layout.setContentsMargins(\n'
         '            MOMENTS_PANEL_CONTENT_MARGIN,\n'
@@ -709,6 +734,8 @@ def test_discovery_interface_uses_three_panel_splitter_layout() -> None:
     assert 'QFrame#MomentsNavItem[active="true"] QLabel#momentsNavItemText' not in qss
     assert 'QLabel#momentsNavBadge {\n    background: {{SURFACE_BG}};\n    color: {{TEXT_PRIMARY}};' in qss
     assert 'QFrame#MomentsRightSection {\n    border-bottom:' not in qss
+    assert 'QListView#MomentsRightListView' in qss
+    assert 'QLabel#MomentsRightListItem' not in qss
     assert 'QWidget#MomentCard' in qss
     assert 'QWidget#MomentCard:hover' not in qss
     assert 'QLabel#discoverySummaryLabel' not in qss

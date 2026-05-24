@@ -5,6 +5,7 @@ QWidget#discoveryViewport,
 QWidget#discoveryColumn,
 QWidget#discoveryFeedContainer,
 QWidget#MomentsFeedList,
+QListView#MomentsRightListView,
 QWidget#MomentsRightContent {
     background: transparent;
 }
@@ -55,10 +56,22 @@ QLabel#MomentsFeedTitle {
 }
 
 QLabel#MomentsProfileBioLabel,
-QLabel#MomentsProfileStatLabel,
-QLabel#MomentsRightListItem {
+QLabel#MomentsProfileStatLabel {
     color: {{TEXT_SECONDARY}};
     font: 11px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QListView#MomentsRightListView {
+    border: none;
+    color: {{TEXT_SECONDARY}};
+    font: 11px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+    outline: none;
+}
+
+QListView#MomentsRightListView::item {
+    padding: 3px 0px;
+    background: transparent;
+    border: none;
 }
 
 QLabel#MomentsProfileStatValue {

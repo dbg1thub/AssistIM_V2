@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QStringListModel, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeyEvent, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QFileDialog,
     QFrame,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListView,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -77,6 +79,7 @@ from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.image_viewer import ImageViewer
+from client.ui.widgets.static_card_frame import StaticCardFrame
 
 
 setup_logging()
@@ -2467,48 +2470,52 @@ class MomentsRightPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.scroll_area = ScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        _prepare_transparent_scroll_area(self.scroll_area)
-        self.content = QWidget(self.scroll_area)
+        self.content = QWidget(self)
         self.content.setObjectName("MomentsRightContent")
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
-        sections = [
-            self._create_digest_section(),
-            self._create_list_section(
-                tr("discovery.sidebar.online", "Online Friends"),
+        self.summary_section = self._create_right_section(
+            tr("discovery.sidebar.ai_digest", "AI Daily Digest"),
+            self._create_digest_card(),
+        )
+        self.online_friends_section = self._create_right_section(
+            tr("discovery.sidebar.online", "Online Friends"),
+            self._create_list_view(
                 [
                     tr("discovery.sidebar.online_placeholder_1", "Friends who just posted will appear here."),
                     tr("discovery.sidebar.online_placeholder_2", "Online status is reserved for later."),
-                ],
+                ]
             ),
-            self._create_list_section(
-                tr("discovery.sidebar.topics", "Hot Topics"),
+        )
+        self.hot_topics_section = self._create_right_section(
+            tr("discovery.sidebar.topics", "Hot Topics"),
+            self._create_list_view(
                 [
                     tr("discovery.sidebar.topic_placeholder_1", "Product updates"),
                     tr("discovery.sidebar.topic_placeholder_2", "Local AI"),
                     tr("discovery.sidebar.topic_placeholder_3", "UI design"),
-                ],
+                ]
             ),
-            self._create_list_section(
-                tr("discovery.sidebar.suggestions", "People You May Know"),
-                [tr("discovery.sidebar.suggestions_placeholder", "Suggestions will be shown here.")],
-            ),
+        )
+        self.people_suggestions_section = self._create_right_section(
+            tr("discovery.sidebar.suggestions", "People You May Know"),
+            self._create_list_view([tr("discovery.sidebar.suggestions_placeholder", "Suggestions will be shown here.")]),
+        )
+        sections = [
+            self.summary_section,
+            self.online_friends_section,
+            self.hot_topics_section,
+            self.people_suggestions_section,
         ]
-        for index, section in enumerate(sections):
+        for section in sections:
             content_layout.addWidget(section)
-            if index < len(sections) - 1:
-                content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
-        content_layout.addStretch(1)
-        self.scroll_area.setWidget(self.content)
-        layout.addWidget(self.scroll_area, 1)
+            content_layout.addWidget(FluentDivider(self.content, variant=FluentDivider.FULL, left_inset=0, right_inset=0))
+        layout.addWidget(self.content, 0)
+        layout.addStretch(1)
 
-    def _create_digest_section(self) -> QWidget:
-        section = self._create_section(tr("discovery.sidebar.ai_digest", "AI Daily Digest"))
-        card = QFrame(section)
+    def _create_digest_card(self) -> QWidget:
+        card = StaticCardFrame(self.content)
         card.setObjectName("MomentsDigestCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(
@@ -2530,19 +2537,25 @@ class MomentsRightPanel(QWidget):
         text.setWordWrap(True)
         card_layout.addWidget(label)
         card_layout.addWidget(text)
-        section.layout().addWidget(card)
-        return section
+        return card
 
-    def _create_list_section(self, title: str, items: list[str]) -> QWidget:
-        section = self._create_section(title)
-        for item_text in items:
-            item = CaptionLabel(item_text, section)
-            item.setObjectName("MomentsRightListItem")
-            item.setWordWrap(True)
-            section.layout().addWidget(item)
-        return section
+    def _create_list_view(self, items: list[str], *, max_items: int = 4) -> QListView:
+        items = items[:max_items]
+        view = QListView(self.content)
+        view.setObjectName("MomentsRightListView")
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        view.setFixedHeight(max(1, len(items)) * 28)
+        model = QStringListModel(items, view)
+        view.setModel(model)
+        return view
 
-    def _create_section(self, title: str) -> QWidget:
+    def _create_right_section(self, title: str, body: QWidget) -> QWidget:
         section = QFrame(self.content if hasattr(self, "content") else self)
         section.setObjectName("MomentsRightSection")
         layout = QVBoxLayout(section)
@@ -2553,9 +2566,18 @@ class MomentsRightPanel(QWidget):
             MOMENTS_PANEL_CONTENT_MARGIN,
         )
         layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(MOMENTS_PANEL_CONTENT_SPACING)
         title_label = CaptionLabel(title, section)
         title_label.setObjectName("MomentsRightSectionTitle")
-        layout.addWidget(title_label)
+        action_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, section)
+        action_button.setObjectName("MomentsRightSectionActionButton")
+        action_button.setToolTip(tr("common.more", "More"))
+        header_layout.addWidget(title_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(action_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header_layout)
+        layout.addWidget(body)
         return section
 
 
