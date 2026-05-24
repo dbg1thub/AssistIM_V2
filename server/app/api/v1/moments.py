@@ -69,10 +69,11 @@ async def _broadcast_moment_refresh(
     """Broadcast a moment refresh hint to currently online clients."""
     if not changed:
         return
+    actor_id = str(actor_user_id or "").strip()
     recipient_ids = [
         value
         for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in connection_manager.online_user_ids())
-        if value
+        if value and value != actor_id
     ]
     if not recipient_ids:
         return

@@ -193,13 +193,20 @@ QLabel#momentVideoCard {
 
 QFrame#ToggleBadge {
     background: {{SURFACE_BG}};
-    border: 1px solid {{BORDER_COLOR}};
+    border: none;
     border-radius: 10px;
+}
+
+QFrame#ToggleBadge[borderVisible="true"] {
+    border: 1px solid rgba(255, 255, 255, 0.20);
 }
 
 QFrame#ToggleBadge[hoverEnabled="true"]:hover {
     background: {{CARD_BG_STRONG}};
-    border: 1px solid {{BORDER_COLOR_STRONG}};
+}
+
+QFrame#ToggleBadge[borderVisible="true"][hoverEnabled="true"]:hover {
+    border: 1px solid rgba(255, 255, 255, 0.28);
 }
 
 QFrame#ToggleBadge[pressEnabled="true"][pressed="true"] {

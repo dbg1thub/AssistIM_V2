@@ -2661,11 +2661,26 @@ class DiscoveryInterface(QWidget):
             return
         event_payload = dict(payload or {}) if isinstance(payload, dict) else {}
         moment_payload = dict(event_payload.get("payload") or {}) if isinstance(event_payload.get("payload"), dict) else {}
+        action = str(moment_payload.get("action") or event_payload.get("reason") or "").strip()
+        moment_id = str(moment_payload.get("moment_id") or "").strip()
         logger.info(
             "Discovery moment refresh requested action=%s moment_id=%s",
-            moment_payload.get("action") or event_payload.get("reason"),
-            moment_payload.get("moment_id"),
+            action,
+            moment_id,
         )
+        detail_refresh_actions = {
+            "moment_liked",
+            "moment_unliked",
+            "moment_commented",
+            "moment_comment_deleted",
+            "moment_updated",
+        }
+        if action in detail_refresh_actions and moment_id:
+            self._request_moment_detail(moment_id)
+            return
+        if action == "moment_deleted" and moment_id:
+            self._apply_local_moment_delete(moment_id)
+            return
         self.reload_data()
 
     async def _reload_data_async(self) -> None:

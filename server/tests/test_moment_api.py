@@ -99,7 +99,7 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     assert create_response.status_code == 200
     moment_id = create_response.json()["data"]["id"]
     assert send_json_to_users.await_count == 1
-    assert send_json_to_users.await_args_list[-1].args[0] == online_user_ids
+    assert send_json_to_users.await_args_list[-1].args[0] == [bob["user"]["id"]]
     create_payload = send_json_to_users.await_args_list[-1].args[1]
     assert create_payload["type"] == "moment_refresh"
     assert create_payload["data"] == {
@@ -117,6 +117,7 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     )
     assert like_response.status_code == 200
     assert send_json_to_users.await_count == 2
+    assert send_json_to_users.await_args_list[-1].args[0] == [alice["user"]["id"]]
     like_payload = send_json_to_users.await_args_list[-1].args[1]
     assert like_payload["data"]["action"] == "moment_liked"
     assert like_payload["data"]["actor_user_id"] == bob["user"]["id"]
@@ -137,6 +138,7 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     )
     assert unlike_response.status_code == 200
     assert send_json_to_users.await_count == 3
+    assert send_json_to_users.await_args_list[-1].args[0] == [alice["user"]["id"]]
     unlike_payload = send_json_to_users.await_args_list[-1].args[1]
     assert unlike_payload["data"]["action"] == "moment_unliked"
     assert unlike_payload["data"]["actor_user_id"] == bob["user"]["id"]
@@ -150,6 +152,7 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     )
     assert comment_response.status_code == 200
     assert send_json_to_users.await_count == 4
+    assert send_json_to_users.await_args_list[-1].args[0] == [alice["user"]["id"]]
     comment_payload = send_json_to_users.await_args_list[-1].args[1]
     assert comment_payload["data"]["action"] == "moment_commented"
     assert comment_payload["data"]["actor_user_id"] == bob["user"]["id"]

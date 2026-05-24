@@ -817,10 +817,14 @@ def test_toggle_badge_supports_persistent_state_icon_text_and_border_control() -
     assert 'def minimumSizeHint(self) -> QSize:' in toggle_badge
     assert 'self.updateGeometry()' in toggle_badge
     assert 'icon.render(painter, icon_rect, fill=self._badge._icon_color())' in toggle_badge
+    assert 'QFrame#ToggleBadge[borderVisible="true"]' in light_qss
+    assert 'border: 1px solid rgba(17, 24, 39, 0.18);' in light_qss
     assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in light_qss
     assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in light_qss
     assert 'QFrame#ToggleBadge[checked="true"]' in light_qss
     assert 'QFrame#ToggleBadge[borderVisible="false"]' in light_qss
+    assert 'QFrame#ToggleBadge[borderVisible="true"]' in dark_qss
+    assert 'border: 1px solid rgba(255, 255, 255, 0.20);' in dark_qss
     assert 'QFrame#ToggleBadge[hoverEnabled="true"]:hover' in dark_qss
     assert 'QFrame#ToggleBadge[pressEnabled="true"][pressed="true"]' in dark_qss
     assert 'QFrame#ToggleBadge[checked="true"]' in dark_qss
@@ -1027,6 +1031,17 @@ def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
     assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
     assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
     assert 'def _on_moment_sync_required(self, payload: object) -> None:' in discovery_interface
+    assert 'detail_refresh_actions = {' in discovery_interface
+    assert '"moment_liked",' in discovery_interface
+    assert '"moment_unliked",' in discovery_interface
+    assert '"moment_commented",' in discovery_interface
+    assert '"moment_comment_deleted",' in discovery_interface
+    assert '"moment_updated",' in discovery_interface
+    assert 'if action in detail_refresh_actions and moment_id:' in discovery_interface
+    assert 'self._request_moment_detail(moment_id)' in discovery_interface
+    assert 'if action == "moment_deleted" and moment_id:' in discovery_interface
+    assert 'self._apply_local_moment_delete(moment_id)' in discovery_interface
+    assert 'self.reload_data()' in discovery_interface
     assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' not in contact_interface
     assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' not in contact_interface
     assert 'def _on_moment_sync_required(self, payload: object) -> None:' not in contact_interface
