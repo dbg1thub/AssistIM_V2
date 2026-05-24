@@ -721,8 +721,7 @@ class ContactDetailCard(StaticCardFrame):
         super().__init__(parent)
         self._entity: Optional[dict[str, object]] = None
         self.header = self
-        self.setObjectName("ContactDetailHeader")
-        self.setBorderRadius(8)
+        self.setObjectName("ContactDetailCard")
         self.setMinimumWidth(420)
         self.setMaximumWidth(460)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)

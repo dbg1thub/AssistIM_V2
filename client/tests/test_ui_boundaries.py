@@ -15,11 +15,27 @@ def test_static_card_frame_is_non_interactive_card_container() -> None:
     assert 'mouseReleaseEvent' not in static_card
     assert 'enterEvent' not in static_card
     assert 'leaveEvent' not in static_card
+    assert 'self._borderRadius = 6' in static_card
     assert 'def _normalBackgroundColor(self) -> QColor:' in static_card
     assert 'QColor(255, 255, 255, 13 if isDarkTheme() else 170)' in static_card
     assert 'def paintEvent(self, event) -> None:' in static_card
+    assert 'QColor(0, 0, 0, 50)' in static_card
+    assert 'QColor(0, 0, 0, 19)' in static_card
     assert 'painter.drawRoundedRect(rect, radius, radius)' in static_card
+    assert 'QPainterPath' not in static_card
     assert 'qconfig.themeChanged.connect(self.update)' in static_card
+
+
+def test_contact_detail_static_card_is_not_overridden_by_qss_background() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    light_qss = Path('client/ui/styles/qss/light/contact_interface.qss').read_text(encoding='utf-8')
+    dark_qss = Path('client/ui/styles/qss/dark/contact_interface.qss').read_text(encoding='utf-8')
+
+    assert 'self.setObjectName("ContactDetailCard")' in contact_interface
+    assert 'self.setObjectName("ContactDetailHeader")' not in contact_interface
+    for qss in (light_qss, dark_qss):
+        assert 'QWidget#ContactDetailHeader' not in qss
+        assert 'QWidget#ContactDetailCard' not in qss
 
 
 def test_ui_does_not_emit_session_updated_events_directly() -> None:
@@ -303,6 +319,8 @@ def test_contact_detail_panel_only_opens_for_friend_items() -> None:
     assert 'from client.ui.widgets.static_card_frame import StaticCardFrame' in contact_interface
     assert 'class ContactDetailCard(StaticCardFrame):' in contact_interface
     assert 'class ContactDetailCard(CardWidget):' not in contact_interface
+    detail_card_block = contact_interface.split('class ContactDetailCard(StaticCardFrame):', 1)[1].split('class UserSearchItem', 1)[0]
+    assert 'self.setBorderRadius(8)' not in detail_card_block
     assert 'class ContactDetailPanel(QWidget):' in contact_interface
     assert 'self.card_stack = AnimatedStackWidget(self)' in detail_panel_block
     assert 'self._cards = [ContactDetailCard(self.card_stack), ContactDetailCard(self.card_stack)]' in detail_panel_block

@@ -83,7 +83,6 @@ QWidget#contactMomentCommentBox {
     border-radius: {{RADIUS_PILL}};
 }
 
-QWidget#ContactDetailHeader,
 QWidget#UserSearchItem,
 QWidget#GroupMemberItem,
 QWidget#ContactMomentItem {
