@@ -292,7 +292,7 @@ def create_default_skill_registry(*, compiler: Any) -> AISkillRegistry:
     registry.register(
         SkillSpec(
             id="MEMORY_QA",
-            description="检索并总结本地聊天记忆。",
+            description="检索并总结本地聊天历史、语音转写、文件内容摘要和图片摘要等本地记忆。",
             input_model=MemoryQASkillInput,
             risk_level="low",
             requires_confirmation=False,

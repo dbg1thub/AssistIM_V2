@@ -13,6 +13,7 @@ from typing import Any, Callable, Sequence
 
 from client.core import logging
 from client.managers.ai_action_executor import AIActionExecutor
+from client.managers.ai_action_intent_gate import AIActionIntentGate
 from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
@@ -802,9 +803,9 @@ class AIActionWorkflow:
         action_store: AIActionStore | AIActionPlanStore | None = None,
         planner: AIActionPlanner | None = None,
         task_manager: Any | None = None,
+        intent_gate: Any | None = None,
         skill_parser: Any | None = None,
         skill_compiler: AISkillCompiler | None = None,
-        skill_layer_enabled: bool = False,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
         memory_summarizer: Any | None = None,
@@ -847,7 +848,8 @@ class AIActionWorkflow:
             action_registry=self._registry,
             registered_action_names=self._registry.names(),
         )
-        self._skill_layer_enabled = bool(skill_layer_enabled)
+        self._legacy_planner_for_new_turns = planner is not None and intent_gate is None and skill_parser is None
+        self._intent_gate = intent_gate or AIActionIntentGate()
         self._skill_compiler = skill_compiler or AISkillCompiler()
         self._skill_parser = skill_parser or AISkillParser(registry=self._skill_compiler.registry)
         self._resource_manager = AIResourceManager(registry=self._registry)
@@ -906,17 +908,6 @@ class AIActionWorkflow:
                 len(normalized_text),
             )
             return AIActionTurnResult(handled=False)
-        unsupported = _unsupported_action_boundary(normalized_text)
-        if unsupported:
-            logger.info(
-                "[ai-diag] ai_action_workflow_rejected thread_id=%s reason=unsupported_action boundary=%s text_chars=%s",
-                thread_id,
-                unsupported,
-                len(normalized_text),
-            )
-            log_perf("unsupported_action", handled=True)
-            return _unsupported_action_turn_result(unsupported)
-
         pending = await self._store.latest_pending_plan(thread_id)
         pending = await self._expire_pending_confirmation_if_needed(pending)
         pending_state = self._pending_for_planner(pending)
@@ -949,6 +940,11 @@ class AIActionWorkflow:
             )
             if control is not None:
                 log_perf(str(control.message_extra.get("ai_action", {}).get("state") or "pending_control"), handled=True, plan=raw_plan)
+                return control
+        else:
+            control = await self._handle_new_turn_control(thread_id, raw_plan)
+            if control is not None:
+                log_perf(str(control.message_extra.get("ai_action", {}).get("state") or "skill_control"), handled=True, plan=raw_plan)
                 return control
 
         if not raw_plan.is_action:
@@ -1155,57 +1151,123 @@ class AIActionWorkflow:
         )
 
     async def _build_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan:
-        skill_plan = await self._build_skill_plan(user_text, pending_state=pending_state)
-        if skill_plan is not None:
-            return skill_plan
+        if pending_state is not None or self._legacy_planner_for_new_turns:
+            return await self._build_legacy_plan(user_text, pending_state=pending_state)
+        return await self._build_skill_plan(user_text)
+
+    async def _build_legacy_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan:
         strict_plan = await self._planner.plan(user_text, pending_state=pending_state, strict=True)
         if strict_plan is not None:
             return strict_plan
         plan = await self._planner.plan(user_text, pending_state=pending_state, strict=False)
         return plan or AIActionPlan(is_action=False)
 
-    async def _build_skill_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan | None:
-        if not self._skill_layer_enabled:
-            return None
-        if pending_state is not None:
-            logger.info("[ai-diag] ai_skill_layer_skipped reason=pending_state")
-            return None
+    async def _build_skill_plan(self, user_text: str) -> AIActionPlan:
         if self._task_manager is None:
-            logger.info("[ai-diag] ai_skill_layer_skipped reason=task_manager_missing")
-            return None
+            logger.info("[ai-diag] ai_skill_layer_unavailable reason=task_manager_missing")
+            return AIActionPlan(is_action=False)
+        classify = getattr(self._intent_gate, "classify", None)
+        if not callable(classify):
+            logger.info("[ai-diag] ai_skill_layer_unavailable reason=intent_gate_missing")
+            return AIActionPlan(is_action=False)
+        decision = await classify(user_text, task_manager=self._task_manager, max_tokens=128, strict=True)
+        if decision is None:
+            logger.info("[ai-diag] ai_skill_layer_unavailable reason=intent_gate_empty")
+            return AIActionPlan(
+                is_action=False,
+                goal=user_text,
+                control={"type": "skill_parse_failed", "reason": "无法判断该请求是否需要 AssistIM 能力。"},
+            )
+        if not bool(getattr(decision, "is_action", False)):
+            logger.info(
+                "[ai-diag] ai_skill_layer_not_action confidence=%s reason=%s",
+                getattr(decision, "confidence", ""),
+                getattr(decision, "reason", ""),
+            )
+            return AIActionPlan(is_action=False, goal=user_text)
         parse = getattr(self._skill_parser, "parse_with_model", None)
         if not callable(parse):
-            logger.info("[ai-diag] ai_skill_layer_skipped reason=parser_unavailable")
-            return None
+            logger.info("[ai-diag] ai_skill_layer_unavailable reason=parser_unavailable")
+            return AIActionPlan(
+                is_action=False,
+                goal=user_text,
+                control={"type": "skill_parse_failed", "reason": "Skill 解析器不可用。"},
+            )
         intent = await parse(user_text, task_manager=self._task_manager, max_tokens=512, strict=True)
         if intent is None:
-            logger.info("[ai-diag] ai_skill_layer_fallback reason=parse_empty")
-            return None
+            logger.info("[ai-diag] ai_skill_layer_failed reason=parse_empty")
+            return AIActionPlan(
+                is_action=False,
+                goal=user_text,
+                control={"type": "skill_parse_failed", "reason": "无法解析这个 AssistIM 请求。"},
+            )
         intent_type = str(getattr(intent, "type", "") or "").strip()
         skill_id = str(getattr(intent, "skill", "") or "").strip()
+        if intent_type == "unsupported":
+            logger.info("[ai-diag] ai_skill_layer_unsupported reason=%s", getattr(intent, "reason", ""))
+            return AIActionPlan(
+                is_action=False,
+                goal=str(getattr(intent, "goal", "") or user_text),
+                control={"type": "unsupported_skill", "reason": str(getattr(intent, "reason", "") or "当前不支持这个 AssistIM 操作。")},
+            )
+        if intent_type == "clarification":
+            control = dict(getattr(intent, "control", {}) or {})
+            logger.info("[ai-diag] ai_skill_layer_clarification missing_slots=%s", ",".join(list(control.get("missing_slots") or [])))
+            return AIActionPlan(
+                is_action=False,
+                goal=str(getattr(intent, "goal", "") or user_text),
+                control={
+                    "type": "skill_clarification",
+                    "reason": str(getattr(intent, "reason", "") or ""),
+                    "missing_slots": list(control.get("missing_slots") or []),
+                    "question": str(control.get("question") or ""),
+                },
+            )
         if intent_type != "skill":
-            logger.info("[ai-diag] ai_skill_layer_fallback reason=intent_type intent_type=%s", intent_type)
-            return None
-        if not self._is_read_only_skill(skill_id):
-            logger.info("[ai-diag] ai_skill_layer_fallback reason=non_read_only_skill skill=%s", skill_id)
-            return None
+            logger.info("[ai-diag] ai_skill_layer_failed reason=unknown_intent_type intent_type=%s", intent_type)
+            return AIActionPlan(
+                is_action=False,
+                goal=user_text,
+                control={"type": "skill_parse_failed", "reason": "Skill 解析结果不可用。"},
+            )
         result = self._skill_compiler.compile(intent)
+        if result.type == "unsupported":
+            logger.info("[ai-diag] ai_skill_layer_compile_unsupported skill=%s reason=%s", skill_id, result.reason)
+            return AIActionPlan(
+                is_action=False,
+                goal=str(getattr(intent, "goal", "") or user_text),
+                control={"type": "unsupported_skill", "reason": result.reason or "当前不支持这个 AssistIM 操作。"},
+            )
+        if result.type == "clarification":
+            logger.info(
+                "[ai-diag] ai_skill_layer_compile_clarification skill=%s missing_slots=%s",
+                skill_id,
+                ",".join(result.missing_slots),
+            )
+            return AIActionPlan(
+                is_action=False,
+                goal=str(getattr(intent, "goal", "") or user_text),
+                control={
+                    "type": "skill_clarification",
+                    "reason": result.reason,
+                    "missing_slots": list(result.missing_slots),
+                    "question": result.question,
+                },
+            )
         if result.type != "plan" or result.plan is None:
             logger.info(
-                "[ai-diag] ai_skill_layer_fallback reason=compile_%s skill=%s missing_slots=%s",
+                "[ai-diag] ai_skill_layer_failed reason=compile_%s skill=%s missing_slots=%s",
                 result.type,
                 skill_id,
                 ",".join(result.missing_slots),
             )
-            return None
+            return AIActionPlan(
+                is_action=False,
+                goal=str(getattr(intent, "goal", "") or user_text),
+                control={"type": "skill_parse_failed", "reason": "无法生成可执行的 AssistIM 操作计划。"},
+            )
         logger.info("[ai-diag] ai_skill_layer_plan_built skill=%s steps=%s", skill_id, len(result.plan.steps))
         return result.plan
-
-    def _is_read_only_skill(self, skill_id: str) -> bool:
-        spec = self._skill_compiler.registry.get(skill_id)
-        if spec is None or not spec.enabled:
-            return False
-        return spec.risk_level == "low" and not spec.requires_confirmation
 
     async def _repair_invalid_plan(
         self,
@@ -1287,6 +1349,53 @@ class AIActionWorkflow:
                 }
             },
         )
+
+    async def _handle_new_turn_control(self, thread_id: str, plan: AIActionPlan) -> AIActionTurnResult | None:
+        control = dict(plan.control or {})
+        control_type = str(control.get("type") or "").strip()
+        if not control_type:
+            return None
+        if control_type == "unsupported_skill":
+            reason = str(control.get("reason") or "当前不支持这个 AssistIM 操作。").strip()
+            return AIActionTurnResult(
+                handled=True,
+                response_text=reason,
+                message_extra={
+                    "ai_action": {
+                        "state": "failed",
+                        "error_code": "UNSUPPORTED_SKILL",
+                        "reason": reason,
+                    }
+                },
+            )
+        if control_type == "skill_clarification":
+            missing_slots = tuple(
+                str(item or "").strip()
+                for item in list(control.get("missing_slots") or [])
+                if str(item or "").strip()
+            )
+            response_text = str(control.get("question") or "请补充完成这个操作所需的信息。").strip()
+            return await self._create_skill_clarification(
+                thread_id,
+                plan,
+                response_text,
+                missing_slots=missing_slots,
+                reason=str(control.get("reason") or "").strip(),
+            )
+        if control_type == "skill_parse_failed":
+            reason = str(control.get("reason") or "无法解析这个 AssistIM 请求。").strip()
+            return AIActionTurnResult(
+                handled=True,
+                response_text=reason,
+                message_extra={
+                    "ai_action": {
+                        "state": "failed",
+                        "error_code": "SKILL_PARSE_FAILED",
+                        "reason": reason,
+                    }
+                },
+            )
+        return None
 
     def _pending_for_planner(self, pending: AIActionPlanRecord | None) -> PendingPlannerState | None:
         if pending is None:
@@ -1573,6 +1682,35 @@ class AIActionWorkflow:
         latest = await self._store.get_plan(record.id) or record
         return AIActionTurnResult(handled=True, response_text=response_text, message_extra={"ai_action": self._extra(latest)})
 
+    async def _create_skill_clarification(
+        self,
+        thread_id: str,
+        plan: AIActionPlan,
+        response_text: str,
+        *,
+        missing_slots: tuple[str, ...],
+        reason: str,
+    ) -> AIActionTurnResult:
+        plan_json = plan.to_dict()
+        record = await self._store.create_plan(
+            thread_id=thread_id,
+            goal=plan.goal,
+            plan_json=plan_json,
+            state="waiting_clarification",
+            reason="skill_clarification",
+        )
+        await self._store.update_plan(
+            record.id,
+            waiting_payload={
+                "type": "clarification",
+                "reason": str(reason or "").strip(),
+                "missing_slots": list(missing_slots),
+                "response_text": response_text,
+            },
+        )
+        latest = await self._store.get_plan(record.id) or record
+        return AIActionTurnResult(handled=True, response_text=response_text, message_extra={"ai_action": self._extra(latest)})
+
     @staticmethod
     def _extra(record: AIActionPlanRecord, *, state: str | None = None) -> dict[str, Any]:
         plan_json = dict(record.plan_json or {})
@@ -1852,39 +1990,6 @@ def _clean_list(value: object) -> list[str]:
 
 def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").split())
-
-
-def _unsupported_action_boundary(text: str) -> str:
-    normalized = _alias_key(text)
-    compact = re.sub(r"\s+", "", normalized)
-    if not compact:
-        return ""
-    if ("撤回" in compact or "召回" in compact) and "消息" in compact:
-        return "message.recall"
-    if "好友" in compact and any(token in compact for token in ("删除", "删掉", "移除", "解除")):
-        return "friend.delete"
-    if "朋友圈" in compact and any(token in compact for token in ("发", "发布", "发表", "上传", "创建", "新建")):
-        return "moment.create"
-    return ""
-
-
-def _unsupported_action_turn_result(boundary: str) -> AIActionTurnResult:
-    operation = {
-        "message.recall": "撤回消息",
-        "friend.delete": "删除好友",
-        "moment.create": "发布朋友圈",
-    }.get(str(boundary or "").strip(), "这个操作")
-    return AIActionTurnResult(
-        handled=True,
-        response_text=f"当前不支持由 AI 助手代你执行{operation}。",
-        message_extra={
-            "ai_action": {
-                "state": "failed",
-                "error_code": "UNSUPPORTED_ACTION",
-                "unsupported_action": boundary,
-            }
-        },
-    )
 
 
 def _alias_key(value: object) -> str:

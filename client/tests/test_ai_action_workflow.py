@@ -346,6 +346,16 @@ class _WorkflowSkillParser:
         return self.intent
 
 
+class _WorkflowIntentGate:
+    def __init__(self, is_action: bool) -> None:
+        self.is_action = bool(is_action)
+        self.calls: list[dict] = []
+
+    async def classify(self, user_text: str, **kwargs):
+        self.calls.append({"user_text": user_text, **dict(kwargs)})
+        return SimpleNamespace(is_action=self.is_action, confidence="high", reason="test")
+
+
 class _WorkflowFallbackPlanner:
     def __init__(self, plan: AIActionPlan | None = None) -> None:
         self.plan_result = plan or AIActionPlan(is_action=False)
@@ -467,8 +477,8 @@ def test_ai_action_workflow_build_plan_uses_read_only_skill_layer_when_enabled()
             planner=planner,
             task_manager=_FakePlannerTaskManager("{}"),
             memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
             skill_parser=parser,
-            skill_layer_enabled=True,
         )
 
         plan = await workflow._build_plan("搜索用户 dengbin", pending_state=None)
@@ -499,8 +509,8 @@ def test_ai_action_workflow_build_plan_accepts_registry_read_only_skill_layer_in
             planner=planner,
             task_manager=_FakePlannerTaskManager("{}"),
             memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
             skill_parser=parser,
-            skill_layer_enabled=True,
         )
 
         plan = await workflow._build_plan("我有哪些好友", pending_state=None)
@@ -511,7 +521,7 @@ def test_ai_action_workflow_build_plan_accepts_registry_read_only_skill_layer_in
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_build_plan_falls_back_for_write_skill_layer_intent() -> None:
+def test_ai_action_workflow_build_plan_compiles_write_skill_without_planner_fallback() -> None:
     async def scenario() -> None:
         parser = _WorkflowSkillParser(
             SkillIntent(
@@ -529,21 +539,25 @@ def test_ai_action_workflow_build_plan_falls_back_for_write_skill_layer_intent()
             planner=planner,
             task_manager=_FakePlannerTaskManager("{}"),
             memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
             skill_parser=parser,
-            skill_layer_enabled=True,
         )
 
         plan = await workflow._build_plan("给 dengbin 说晚点联系你", pending_state=None)
 
-        assert plan == fallback_plan
+        assert [step.action for step in plan.steps] == [
+            "contact.resolve",
+            "message.draft",
+            "user.confirm",
+            "message.send",
+        ]
         assert parser.calls
-        assert len(planner.calls) == 1
-        assert planner.calls[0]["strict"] is True
+        assert planner.calls == []
 
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_build_plan_skips_skill_layer_when_disabled() -> None:
+def test_ai_action_workflow_build_plan_skips_skill_parser_for_regular_chat() -> None:
     async def scenario() -> None:
         parser = _WorkflowSkillParser(
             SkillIntent(
@@ -560,14 +574,33 @@ def test_ai_action_workflow_build_plan_skips_skill_layer_when_disabled() -> None
             planner=planner,
             task_manager=_FakePlannerTaskManager("{}"),
             memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(False),
             skill_parser=parser,
-            skill_layer_enabled=False,
+        )
+
+        plan = await workflow._build_plan("你好", pending_state=None)
+
+        assert plan.is_action is False
+        assert parser.calls == []
+        assert planner.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_uses_explicit_planner_as_legacy_test_hook() -> None:
+    async def scenario() -> None:
+        fallback_plan = AIActionPlan(is_action=False, goal="fallback")
+        planner = _WorkflowFallbackPlanner(fallback_plan)
+        workflow = AIActionWorkflow(
+            action_store=SimpleNamespace(),
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
         )
 
         plan = await workflow._build_plan("搜索用户 dengbin", pending_state=None)
 
         assert plan == fallback_plan
-        assert parser.calls == []
         assert len(planner.calls) == 1
         assert planner.calls[0]["strict"] is True
 
@@ -4397,6 +4430,89 @@ def test_ai_action_workflow_ignores_regular_chat(tmp_path, monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_skill_unsupported_is_handled_without_chat_fallback(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="unsupported",
+                goal="删除好友",
+                reason="当前未注册可删除好友的 Skill。",
+            )
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我删除 dengbin 好友")
+
+            assert result.handled is True
+            assert "当前未注册可删除好友的 Skill" in result.response_text
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_SKILL"
+            assert parser.calls
+            assert planner.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_skill_clarification_creates_pending_plan(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="clarification",
+                goal="查看最近消息",
+                reason="缺少会话 ID。",
+                control={
+                    "missing_slots": ["session_id"],
+                    "question": "要查看哪个会话的最近消息？",
+                },
+            )
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="查看最近 20 条消息")
+
+            assert result.handled is True
+            assert result.response_text == "要查看哪个会话的最近消息？"
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert action_extra["waiting"]["missing_slots"] == ["session_id"]
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.goal == "查看最近消息"
+            assert plan.waiting_payload["reason"] == "缺少会话 ID。"
+            assert plan.waiting_payload["missing_slots"] == ["session_id"]
+            assert planner.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_rejects_legacy_single_business_actions(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
@@ -5027,25 +5143,20 @@ def test_ai_action_workflow_rejects_unsupported_recall_before_planning(tmp_path,
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
-        planner = _UnsafeUnsupportedActionPlanner(
-            AIActionPlan(
-                is_action=True,
-                goal="误规划为聊天记录查询",
-                risk="low",
-                steps=(
-                    AIActionStep(
-                        id="list_messages",
-                        action="message.list",
-                        args={"session_id": "session-1", "limit": 20},
-                    ),
-                ),
-                final={"type": "answer", "source": "$list_messages"},
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="unsupported",
+                goal="撤回消息",
+                reason="当前不支持撤回消息。",
             )
         )
         server_reader = _FakeServerReadClient()
         workflow = AIActionWorkflow(
             action_store=store,
-            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
             contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             server_reader=server_reader,
         )
@@ -5055,8 +5166,8 @@ def test_ai_action_workflow_rejects_unsupported_recall_before_planning(tmp_path,
             assert result.handled is True
             assert "当前不支持" in result.response_text
             assert result.message_extra["ai_action"]["state"] == "failed"
-            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
-            assert planner.calls == 0
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_SKILL"
+            assert parser.calls
             assert server_reader.calls == []
             assert await store.latest_pending_plan("thread-1") is None
         finally:
@@ -5070,25 +5181,20 @@ def test_ai_action_workflow_rejects_unsupported_friend_delete_before_planning(tm
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
-        planner = _UnsafeUnsupportedActionPlanner(
-            AIActionPlan(
-                is_action=True,
-                goal="误规划为好友关系查询",
-                risk="low",
-                steps=(
-                    AIActionStep(
-                        id="check_friend",
-                        action="friend.check",
-                        args={"user_id": "user-1"},
-                    ),
-                ),
-                final={"type": "answer", "source": "$check_friend"},
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="unsupported",
+                goal="删除好友",
+                reason="当前不支持删除好友。",
             )
         )
         server_reader = _FakeServerReadClient()
         workflow = AIActionWorkflow(
             action_store=store,
-            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
             contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             server_reader=server_reader,
         )
@@ -5098,8 +5204,8 @@ def test_ai_action_workflow_rejects_unsupported_friend_delete_before_planning(tm
             assert result.handled is True
             assert "当前不支持" in result.response_text
             assert result.message_extra["ai_action"]["state"] == "failed"
-            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
-            assert planner.calls == 0
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_SKILL"
+            assert parser.calls
             assert server_reader.calls == []
             assert await store.latest_pending_plan("thread-1") is None
         finally:
@@ -5113,31 +5219,20 @@ def test_ai_action_workflow_rejects_unsupported_moment_publish_before_planning(t
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
-        planner = _UnsafeUnsupportedActionPlanner(
-            AIActionPlan(
-                is_action=True,
-                goal="误规划为发消息",
-                risk="high",
-                steps=(
-                    AIActionStep(
-                        id="resolve_target",
-                        action="contact.resolve",
-                        args={"queries": ["朋友圈"], "allow_multiple": False},
-                    ),
-                    AIActionStep(
-                        id="draft_message",
-                        action="message.draft",
-                        depends_on=("resolve_target",),
-                        args={"target": "$resolve_target.contacts[0]", "content": "测试"},
-                    ),
-                ),
-                final={"type": "answer", "source": "$draft_message"},
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="unsupported",
+                goal="发布朋友圈",
+                reason="当前不支持发布朋友圈。",
             )
         )
         message_sender = _FakeActionMessageSender()
         workflow = AIActionWorkflow(
             action_store=store,
-            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
             contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             message_sender=message_sender,
         )
@@ -5147,8 +5242,8 @@ def test_ai_action_workflow_rejects_unsupported_moment_publish_before_planning(t
             assert result.handled is True
             assert "当前不支持" in result.response_text
             assert result.message_extra["ai_action"]["state"] == "failed"
-            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
-            assert planner.calls == 0
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_SKILL"
+            assert parser.calls
             assert message_sender.calls == []
             assert await store.latest_pending_plan("thread-1") is None
         finally:
@@ -7251,13 +7346,13 @@ def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, m
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_default_planner_uses_task_manager(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_default_intent_gate_uses_task_manager(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
         task_manager = _FakePlannerTaskManager(
-            '{"is_action": false, "goal": "普通聊天", "risk": "low", "steps": [], "final": {}}'
+            '{"is_action": false, "confidence": 0.95, "reason": "普通聊天"}'
         )
         workflow = AIActionWorkflow(
             action_store=store,
@@ -7267,76 +7362,33 @@ def test_ai_action_workflow_default_planner_uses_task_manager(tmp_path, monkeypa
             result = await workflow.handle_user_turn(thread_id="thread-1", text="你好")
 
             assert result.handled is False
-            assert len(task_manager.requests) == 2
-            selector_request, planner_request = task_manager.requests
-            assert selector_request.max_tokens == AIActionPlanner.CANDIDATE_MAX_TOKENS
-            assert selector_request.metadata["source"] == "ai_action_candidate_selector"
-            assert selector_request.metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
-            assert selector_request.response_format["type"] == "json_object"
-            assert "用户输入：你好" in selector_request.messages[0]["content"]
-            assert planner_request.metadata["source"] == "ai_action_planner"
-            assert planner_request.metadata["candidate_selector_fallback"] is True
+            assert len(task_manager.requests) == 1
+            gate_request = task_manager.requests[0]
+            assert gate_request.max_tokens == 128
+            assert gate_request.metadata["source"] == "ai_action_intent_gate"
+            assert gate_request.metadata["intent_schema_version"] == "assistim_intent_gate_v1"
+            assert gate_request.response_format["type"] == "json_object"
+            assert "用户输入：你好" in gate_request.messages[0]["content"]
         finally:
             await db.close()
 
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_transfer_phrase(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_default_skill_path_can_surface_send_confirmation_for_transfer_phrase(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
-        task_manager = _FakePlannerTaskManager(
-            [
-                '{"is_action": true, "goal": "发送消息", "candidate_actions": ["message.send"], "reason": "需要发送文本消息"}',
-                """
-                {
-                  "is_action": true,
-                  "goal": "发送消息",
-                  "risk": "high",
-                  "steps": [
-                    {
-                      "id": "resolve_target",
-                      "action": "contact.resolve",
-                      "depends_on": [],
-                      "args": {"queries": ["test3"], "allow_multiple": false}
-                    },
-                    {
-                      "id": "draft_message",
-                      "action": "message.draft",
-                      "depends_on": ["resolve_target"],
-                      "args": {"target": "$resolve_target.contacts[0]", "content": "我晚点联系他"}
-                    },
-                    {
-                      "id": "confirm_send",
-                      "action": "user.confirm",
-                      "depends_on": ["draft_message"],
-                      "args": {
-                        "risk": "high",
-                        "preview": {
-                          "operation": "发送消息",
-                          "target": "$draft_message.target",
-                          "content": "$draft_message.content"
-                        }
-                      }
-                    },
-                    {
-                      "id": "send_message",
-                      "action": "message.send",
-                      "depends_on": ["confirm_send", "draft_message"],
-                      "args": {
-                        "target": "$draft_message.target_entity",
-                        "content": "$draft_message.content",
-                        "preview": "$draft_message.preview",
-                        "idempotency_key": "$draft_message.idempotency_key"
-                      }
-                    }
-                  ],
-                  "final": {"type": "answer", "source": "$send_message.text"}
-                }
-                """,
-            ]
+        task_manager = _FakePlannerTaskManager("{}")
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEND_MESSAGE",
+                goal="发送消息",
+                slots={"target": "test3", "content": "我晚点联系他"},
+                confidence="high",
+            )
         )
         contact_db = _FakeContactDatabase(
             [
@@ -7353,6 +7405,8 @@ def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_tr
         workflow = AIActionWorkflow(
             action_store=store,
             task_manager=task_manager,
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             message_sender=_FakeActionMessageSender(),
         )
@@ -7364,14 +7418,8 @@ def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_tr
             assert result.message_extra["ai_action"]["action"] == "send_message"
             assert "确认要发送消息给test3" in result.response_text
             assert "我晚点联系他" in result.response_text
-            assert len(task_manager.requests) == 2
-            assert task_manager.requests[0].metadata["source"] == "ai_action_candidate_selector"
-            assert task_manager.requests[1].metadata["candidate_action_closure"] == [
-                "contact.resolve",
-                "message.draft",
-                "user.confirm",
-                "message.send",
-            ]
+            assert parser.calls
+            assert task_manager.requests == []
             assert contact_db.resolve_calls == [{"alias": "test3", "limit": 20}]
         finally:
             await db.close()

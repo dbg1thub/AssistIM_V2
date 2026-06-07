@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 from client.managers.ai_skill_compiler import AISkillCompiler
 from client.managers.ai_skill_registry import AISkillRegistry
@@ -91,6 +92,9 @@ class AISkillParser:
             "你只能输出 type=skill、unsupported 或 clarification。\n"
             "skill 必须从已注册 Skill 中选择；禁止输出原子动作链或执行步骤。\n"
             "你只负责语义分类和 slot 抽取，不负责生成执行步骤。\n"
+            "type=skill 时必须输出 skill 和 slots；slots 没有字段也输出 {}。\n"
+            "可选 slot 未提供时省略或使用默认值，不要因为缺少可选 slot 输出 unsupported。\n"
+            "slot 值必须符合字段类型和 enum；除非字段允许 null，否则不要输出 null。\n"
             "搜索/查看 AssistIM 用户、好友、会话、消息、朋友圈和本地记忆都属于 AssistIM 能力。\n"
             "如果用户需要的能力没有对应 Skill，输出 unsupported，不要映射到相近 Skill。\n"
             f"{_skill_catalog_prompt(self._registry)}"
@@ -130,6 +134,8 @@ def _parse_skill_payload(payload: dict[str, Any], *, registry: AISkillRegistry) 
     if not isinstance(slots, dict):
         return None
     if not _slot_fields_are_known(slots, spec.input_model):
+        return None
+    if not _slot_values_are_valid(slots, spec.input_model):
         return None
     confidence = str(payload.get("confidence") or "medium").strip().lower() or "medium"
     if confidence not in VALID_CONFIDENCE:
@@ -180,6 +186,19 @@ def _slot_fields_are_known(slots: dict[str, Any], input_model: type[Any]) -> boo
     return not (set(slots) - set(fields))
 
 
+def _slot_values_are_valid(slots: dict[str, Any], input_model: type[Any]) -> bool:
+    fields = getattr(input_model, "model_fields", None)
+    if not isinstance(fields, dict):
+        return True
+    for name, value in slots.items():
+        field = fields.get(name)
+        if field is None:
+            return False
+        if value is None and not _annotation_allows_none(getattr(field, "annotation", Any)):
+            return False
+    return True
+
+
 def _parse_json_object(raw_output: str) -> dict[str, Any] | None:
     text = str(raw_output or "").strip()
     if not text:
@@ -213,6 +232,53 @@ def _skill_slot_prompt(input_model: type[Any]) -> str:
         return "{}"
     parts: list[str] = []
     for name, field in fields.items():
-        marker = "!" if callable(getattr(field, "is_required", None)) and field.is_required() else ""
-        parts.append(f"{name}{marker}")
+        required = callable(getattr(field, "is_required", None)) and field.is_required()
+        part = f"{name}{_annotation_prompt(getattr(field, 'annotation', Any))}"
+        if required:
+            part += "!"
+        else:
+            part += " optional"
+            default_text = _field_default_prompt(field)
+            if default_text:
+                part += f" default={default_text}"
+        parts.append(part)
     return "{" + ", ".join(parts) + "}"
+
+
+def _annotation_prompt(annotation: Any) -> str:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        values = "|".join(str(item) for item in args)
+        return f" enum[{values}]"
+    if origin in (Union, UnionType):
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            return _annotation_prompt(non_none[0])
+    if origin in (list, tuple):
+        return " list"
+    if annotation in (str, int, float, bool, dict):
+        return f" {annotation.__name__}"
+    return ""
+
+
+def _annotation_allows_none(annotation: Any) -> bool:
+    if annotation is Any:
+        return True
+    if annotation is type(None):
+        return True
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        return any(arg is type(None) for arg in get_args(annotation))
+    return False
+
+
+def _field_default_prompt(field: Any) -> str:
+    if getattr(field, "default_factory", None) is not None:
+        return ""
+    default = getattr(field, "default", None)
+    if default is None or str(default) == "PydanticUndefined":
+        return ""
+    if isinstance(default, (str, int, float, bool)):
+        return str(default)
+    return ""
