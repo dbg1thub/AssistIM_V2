@@ -17,6 +17,10 @@ class AISkillCompiler:
     def __init__(self) -> None:
         self._registry = create_default_skill_registry(compiler=self)
 
+    @property
+    def registry(self):
+        return self._registry
+
     def compile(self, intent: SkillIntent) -> SkillCompileResult:
         skill_id = str(intent.skill or "").strip()
         if intent.type == "unsupported":
