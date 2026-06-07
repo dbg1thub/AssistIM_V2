@@ -9,6 +9,10 @@ def _parser() -> AISkillParser:
     return AISkillParser(registry=AISkillCompiler().registry)
 
 
+def _skill_names() -> list[str]:
+    return list(AISkillCompiler().registry.names())
+
+
 class _FakeTaskManager:
     def __init__(self, raw_output: str) -> None:
         self.raw_output = raw_output
@@ -147,13 +151,20 @@ def test_skill_parser_schema_does_not_allow_atomic_action_fields() -> None:
     assert "steps" not in properties
     assert "action" not in properties
     assert "depends_on" not in properties
-    assert properties["skill"]["enum"] == [
-        "MEMORY_QA",
-        "SEARCH_USER",
-        "SEND_FRIEND_REQUEST",
-        "SEND_MESSAGE",
-        "VIEW_USER_PROFILE",
-    ]
+    assert properties["skill"]["enum"] == _skill_names()
+    assert "LIST_SESSION_MESSAGES" in properties["skill"]["enum"]
+    assert "ACCEPT_FRIEND_REQUEST" in properties["skill"]["enum"]
+
+
+def test_skill_parser_system_prompt_contains_generated_skill_catalog() -> None:
+    prompt = _parser().system_prompt()
+
+    assert "LIST_SESSION_MESSAGES" in prompt
+    assert "ACCEPT_FRIEND_REQUEST" in prompt
+    assert "session_id" in prompt
+    assert "request_id" in prompt
+    assert "steps" not in prompt
+    assert "depends_on" not in prompt
 
 
 def test_skill_parser_parse_with_model_builds_strict_local_request() -> None:
@@ -180,13 +191,7 @@ def test_skill_parser_parse_with_model_builds_strict_local_request() -> None:
     assert request.must_be_local is True
     assert request.stream is False
     assert request.temperature == 0.0
-    assert request.response_format["schema"]["properties"]["skill"]["enum"] == [
-        "MEMORY_QA",
-        "SEARCH_USER",
-        "SEND_FRIEND_REQUEST",
-        "SEND_MESSAGE",
-        "VIEW_USER_PROFILE",
-    ]
+    assert request.response_format["schema"]["properties"]["skill"]["enum"] == _skill_names()
     assert request.metadata["source"] == "ai_skill_parser"
     assert request.metadata["skill_schema_version"] == AISkillParser.SCHEMA_VERSION
     assert "steps" not in request.system_prompt

@@ -63,6 +63,36 @@ class AISkillCompiler:
 
     def compile_view_user_profile(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
         target = str(getattr(slots, "target", "") or "").strip()
+        source = str(getattr(slots, "source", "") or "contact").strip()
+        if source == "user_id":
+            return self._single_step_plan(
+                intent,
+                fallback=f"查看 {target} 的资料",
+                step_id="get_profile",
+                action="user.get",
+                args={"user_id": target},
+            )
+        if source == "search":
+            return AIActionPlan(
+                is_action=True,
+                goal=_goal(intent, f"查看 {target} 的资料"),
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_user",
+                        action="user.search",
+                        args={"keyword": target, "page": 1, "size": 10},
+                        depends_on=(),
+                    ),
+                    AIActionStep(
+                        id="get_profile",
+                        action="user.get",
+                        args={"user_id": "$search_user.items[0].id"},
+                        depends_on=("search_user",),
+                    ),
+                ),
+                final={"source": "$get_profile"},
+            )
         return AIActionPlan(
             is_action=True,
             goal=_goal(intent, f"查看 {target} 的资料"),
@@ -82,6 +112,196 @@ class AISkillCompiler:
                 ),
             ),
             final={"source": "$get_profile"},
+        )
+
+    def compile_list_friends(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        return self._single_step_plan(intent, fallback="查看好友列表", step_id="list_friends", action="friend.list", args={})
+
+    def compile_check_friendship(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        target = str(getattr(slots, "target", "") or "").strip()
+        source = str(getattr(slots, "source", "") or "search").strip()
+        if source == "user_id":
+            return self._single_step_plan(
+                intent,
+                fallback=f"检查和 {target} 是否是好友",
+                step_id="check_friendship",
+                action="friend.check",
+                args={"user_id": target},
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, f"检查和 {target} 是否是好友"),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="search_user",
+                    action="user.search",
+                    args={"keyword": target, "page": 1, "size": 10},
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="check_friendship",
+                    action="friend.check",
+                    args={"user_id": "$search_user.items[0].id"},
+                    depends_on=("search_user",),
+                ),
+            ),
+            final={"source": "$check_friendship"},
+        )
+
+    def compile_list_friend_requests(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        return self._single_step_plan(
+            intent,
+            fallback="查看好友申请列表",
+            step_id="list_friend_requests",
+            action="friend.request.list",
+            args={},
+        )
+
+    def compile_list_groups(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        return self._single_step_plan(intent, fallback="查看群组列表", step_id="list_groups", action="group.list", args={})
+
+    def compile_view_group(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        target = str(getattr(slots, "target", "") or "").strip()
+        source = str(getattr(slots, "source", "") or "group_id").strip()
+        if source == "group_id":
+            return self._single_step_plan(
+                intent,
+                fallback=f"查看群组 {target}",
+                step_id="get_group",
+                action="group.get",
+                args={"group_id": target},
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, f"查看群组 {target}"),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="resolve_group",
+                    action="contact.resolve",
+                    args={"queries": [target], "allow_multiple": False},
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="get_group",
+                    action="group.get",
+                    args={"group_id": "$resolve_group.groups[0].id"},
+                    depends_on=("resolve_group",),
+                ),
+            ),
+            final={"source": "$get_group"},
+        )
+
+    def compile_list_sessions(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        return self._single_step_plan(intent, fallback="查看会话列表", step_id="list_sessions", action="session.list", args={})
+
+    def compile_view_session(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        session_id = str(getattr(slots, "session_id", "") or "").strip()
+        return self._single_step_plan(
+            intent,
+            fallback=f"查看会话 {session_id}",
+            step_id="get_session",
+            action="session.get",
+            args={"session_id": session_id},
+        )
+
+    def compile_list_session_messages(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        session_id = str(getattr(slots, "session_id", "") or "").strip()
+        limit = int(getattr(slots, "limit", 50) or 50)
+        before_seq = getattr(slots, "before_seq", None)
+        return self._single_step_plan(
+            intent,
+            fallback=f"查看会话 {session_id} 的最近消息",
+            step_id="list_messages",
+            action="message.list",
+            args={"session_id": session_id, "limit": limit, "before_seq": before_seq},
+        )
+
+    def compile_list_uploaded_files(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        limit = int(getattr(slots, "limit", 50) or 50)
+        return self._single_step_plan(
+            intent,
+            fallback="查看上传过的文件",
+            step_id="list_files",
+            action="file.list",
+            args={"limit": limit},
+        )
+
+    def compile_list_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        page = int(getattr(slots, "page", 1) or 1)
+        size = int(getattr(slots, "size", 20) or 20)
+        return self._single_step_plan(
+            intent,
+            fallback="查看朋友圈列表",
+            step_id="list_moments",
+            action="moment.list",
+            args={"page": page, "size": size},
+        )
+
+    def compile_list_user_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        target = str(getattr(slots, "target", "") or "").strip()
+        source = str(getattr(slots, "source", "") or "user_id").strip()
+        page = int(getattr(slots, "page", 1) or 1)
+        size = int(getattr(slots, "size", 20) or 20)
+        if source == "user_id":
+            return self._single_step_plan(
+                intent,
+                fallback=f"查看 {target} 的朋友圈",
+                step_id="list_moments",
+                action="moment.list",
+                args={"user_id": target, "page": page, "size": size},
+            )
+        if source == "search":
+            return AIActionPlan(
+                is_action=True,
+                goal=_goal(intent, f"查看 {target} 的朋友圈"),
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_user",
+                        action="user.search",
+                        args={"keyword": target, "page": 1, "size": 10},
+                        depends_on=(),
+                    ),
+                    AIActionStep(
+                        id="list_moments",
+                        action="moment.list",
+                        args={"user_id": "$search_user.items[0].id", "page": page, "size": size},
+                        depends_on=("search_user",),
+                    ),
+                ),
+                final={"source": "$list_moments"},
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, f"查看 {target} 的朋友圈"),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="resolve_target",
+                    action="contact.resolve",
+                    args={"queries": [target], "allow_multiple": False},
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="list_moments",
+                    action="moment.list",
+                    args={"user_id": "$resolve_target.contacts[0].id", "page": page, "size": size},
+                    depends_on=("resolve_target",),
+                ),
+            ),
+            final={"source": "$list_moments"},
+        )
+
+    def compile_view_moment(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        moment_id = str(getattr(slots, "moment_id", "") or "").strip()
+        return self._single_step_plan(
+            intent,
+            fallback=f"查看朋友圈 {moment_id}",
+            step_id="get_moment",
+            action="moment.get",
+            args={"moment_id": moment_id},
         )
 
     def compile_send_message(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
@@ -178,12 +398,60 @@ class AISkillCompiler:
             final={"source": "$send_friend_request"},
         )
 
+    def compile_accept_friend_request(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        request_id = str(getattr(slots, "request_id", "") or "").strip()
+        return self._friend_request_decision_plan(
+            intent,
+            request_id=request_id,
+            operation="接受好友申请",
+            action="friend.request.accept",
+        )
+
+    def compile_reject_friend_request(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        request_id = str(getattr(slots, "request_id", "") or "").strip()
+        return self._friend_request_decision_plan(
+            intent,
+            request_id=request_id,
+            operation="拒绝好友申请",
+            action="friend.request.reject",
+        )
+
     def compile_memory_qa(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
         participants = [str(item or "").strip() for item in list(getattr(slots, "participants", []) or []) if str(item or "").strip()]
         question = str(getattr(slots, "question", "") or "").strip()
         time_scope = dict(getattr(slots, "time_scope", {}) or {"type": "all_history"})
         keywords = [str(item or "").strip() for item in list(getattr(slots, "keywords", []) or []) if str(item or "").strip()]
         limit = int(getattr(slots, "limit", 8) or 8)
+        memory_args = {
+            "participants": "$resolve_participants.contacts" if participants else [],
+            "participant_match": "any",
+            "time_scope": time_scope,
+            "keywords": keywords,
+            "question": question,
+            "limit": limit,
+            "return_raw_content": False,
+        }
+        if not participants:
+            return AIActionPlan(
+                is_action=True,
+                goal=_goal(intent, question or "查询本地记忆"),
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_memory",
+                        action="memory.search",
+                        args=memory_args,
+                        depends_on=(),
+                    ),
+                    AIActionStep(
+                        id="summarize_memory",
+                        action="memory.summarize",
+                        args={"source": "$search_memory", "question": question, "style": "summary"},
+                        depends_on=("search_memory",),
+                    ),
+                ),
+                final={"source": "$summarize_memory"},
+            )
         return AIActionPlan(
             is_action=True,
             goal=_goal(intent, question or "查询本地记忆"),
@@ -198,15 +466,7 @@ class AISkillCompiler:
                 AIActionStep(
                     id="search_memory",
                     action="memory.search",
-                    args={
-                        "participants": "$resolve_participants.contacts",
-                        "participant_match": "any",
-                        "time_scope": time_scope,
-                        "keywords": keywords,
-                        "question": question,
-                        "limit": limit,
-                        "return_raw_content": False,
-                    },
+                    args=memory_args,
                     depends_on=("resolve_participants",),
                 ),
                 AIActionStep(
@@ -217,6 +477,70 @@ class AISkillCompiler:
                 ),
             ),
             final={"source": "$summarize_memory"},
+        )
+
+    def _single_step_plan(
+        self,
+        intent: SkillIntent,
+        *,
+        fallback: str,
+        step_id: str,
+        action: str,
+        args: dict[str, Any],
+    ) -> AIActionPlan:
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, fallback),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id=step_id,
+                    action=action,
+                    args=dict(args),
+                    depends_on=(),
+                ),
+            ),
+            final={"source": f"${step_id}"},
+        )
+
+    def _friend_request_decision_plan(
+        self,
+        intent: SkillIntent,
+        *,
+        request_id: str,
+        operation: str,
+        action: str,
+    ) -> AIActionPlan:
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, f"{operation} {request_id}"),
+            risk="high",
+            steps=(
+                AIActionStep(
+                    id="confirm_request",
+                    action="user.confirm",
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": operation,
+                            "target": request_id,
+                            "content": operation,
+                        },
+                    },
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="handle_request",
+                    action=action,
+                    args={
+                        "request_id": request_id,
+                        "preview": "$confirm_request.preview",
+                        "idempotency_key": "$confirm_request.preview_fingerprint",
+                    },
+                    depends_on=("confirm_request",),
+                ),
+            ),
+            final={"source": "$handle_request"},
         )
 
 

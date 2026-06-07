@@ -90,7 +90,10 @@ class AISkillParser:
             "你是 AssistIM 的 Skill 意图解析器。只输出 JSON object。\n"
             "你只能输出 type=skill、unsupported 或 clarification。\n"
             "skill 必须从已注册 Skill 中选择；禁止输出原子动作链或执行步骤。\n"
-            "你只负责语义分类和 slot 抽取，不负责生成执行步骤。"
+            "你只负责语义分类和 slot 抽取，不负责生成执行步骤。\n"
+            "搜索/查看 AssistIM 用户、好友、会话、消息、朋友圈和本地记忆都属于 AssistIM 能力。\n"
+            "如果用户需要的能力没有对应 Skill，输出 unsupported，不要映射到相近 Skill。\n"
+            f"{_skill_catalog_prompt(self._registry)}"
         )
 
     @staticmethod
@@ -192,3 +195,24 @@ def _parse_json_object(raw_output: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _skill_catalog_prompt(registry: AISkillRegistry) -> str:
+    lines = ["已注册 Skill："]
+    for skill_id in registry.names():
+        spec = registry.get(skill_id)
+        if spec is None or not spec.enabled:
+            continue
+        lines.append(f"- {spec.id}: {spec.description} slots={_skill_slot_prompt(spec.input_model)}")
+    return "\n".join(lines)
+
+
+def _skill_slot_prompt(input_model: type[Any]) -> str:
+    fields = getattr(input_model, "model_fields", None)
+    if not isinstance(fields, dict) or not fields:
+        return "{}"
+    parts: list[str] = []
+    for name, field in fields.items():
+        marker = "!" if callable(getattr(field, "is_required", None)) and field.is_required() else ""
+        parts.append(f"{name}{marker}")
+    return "{" + ", ".join(parts) + "}"

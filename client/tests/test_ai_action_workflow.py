@@ -482,6 +482,35 @@ def test_ai_action_workflow_build_plan_uses_read_only_skill_layer_when_enabled()
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_build_plan_accepts_registry_read_only_skill_layer_intent() -> None:
+    async def scenario() -> None:
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="LIST_FRIENDS",
+                goal="查看好友列表",
+                slots={},
+                confidence="high",
+            )
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        workflow = AIActionWorkflow(
+            action_store=SimpleNamespace(),
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            skill_parser=parser,
+            skill_layer_enabled=True,
+        )
+
+        plan = await workflow._build_plan("我有哪些好友", pending_state=None)
+
+        assert [step.action for step in plan.steps] == ["friend.list"]
+        assert planner.calls == []
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_build_plan_falls_back_for_write_skill_layer_intent() -> None:
     async def scenario() -> None:
         parser = _WorkflowSkillParser(

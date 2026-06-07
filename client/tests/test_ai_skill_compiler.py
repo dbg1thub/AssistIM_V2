@@ -2,6 +2,7 @@ from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_skill_compiler import AISkillCompiler
 from client.managers.ai_skill_types import SkillIntent
+import pytest
 
 
 class _FakeContactResolver:
@@ -28,6 +29,10 @@ def _step(plan, action):
         if step.action == action:
             return step
     raise AssertionError(f"missing step action: {action}")
+
+
+def _compile(skill: str, slots: dict, *, goal: str = ""):
+    return _compiler().compile(SkillIntent(type="skill", skill=skill, goal=goal or skill, slots=slots))
 
 
 def test_send_message_skill_compiles_to_confirmed_message_plan() -> None:
@@ -66,6 +71,141 @@ def test_send_message_skill_compiles_to_confirmed_message_plan() -> None:
         "content": "$draft_message.content",
         "preview": "$draft_message.preview",
         "idempotency_key": "$draft_message.idempotency_key",
+    }
+    assert _validator().validate(result.plan).allowed
+
+
+@pytest.mark.parametrize(
+    ("skill", "slots", "expected_action", "expected_args"),
+    [
+        ("LIST_FRIENDS", {}, "friend.list", {}),
+        ("LIST_FRIEND_REQUESTS", {}, "friend.request.list", {}),
+        ("LIST_GROUPS", {}, "group.list", {}),
+        ("LIST_SESSIONS", {}, "session.list", {}),
+        ("LIST_UPLOADED_FILES", {"limit": 30}, "file.list", {"limit": 30}),
+        ("LIST_MOMENTS", {"page": 2, "size": 10}, "moment.list", {"page": 2, "size": 10}),
+    ],
+)
+def test_server_read_list_skills_compile_to_single_read_action(
+    skill: str,
+    slots: dict,
+    expected_action: str,
+    expected_args: dict,
+) -> None:
+    result = _compile(skill, slots)
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == [expected_action]
+    assert result.plan.steps[0].args == expected_args
+    assert _validator().validate(result.plan).allowed
+
+
+@pytest.mark.parametrize(
+    ("skill", "slots", "expected_action", "expected_args"),
+    [
+        ("VIEW_USER_PROFILE", {"target": "user-3", "source": "user_id"}, "user.get", {"user_id": "user-3"}),
+        ("VIEW_GROUP", {"target": "group-1", "source": "group_id"}, "group.get", {"group_id": "group-1"}),
+        ("VIEW_SESSION", {"session_id": "session-1"}, "session.get", {"session_id": "session-1"}),
+        (
+            "LIST_SESSION_MESSAGES",
+            {"session_id": "session-1", "limit": 20},
+            "message.list",
+            {"session_id": "session-1", "limit": 20, "before_seq": None},
+        ),
+        ("VIEW_MOMENT", {"moment_id": "moment-1"}, "moment.get", {"moment_id": "moment-1"}),
+    ],
+)
+def test_server_read_detail_skills_compile_direct_id_plans(
+    skill: str,
+    slots: dict,
+    expected_action: str,
+    expected_args: dict,
+) -> None:
+    result = _compile(skill, slots)
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == [expected_action]
+    assert result.plan.steps[0].args == expected_args
+    assert _validator().validate(result.plan).allowed
+
+
+@pytest.mark.parametrize(
+    ("skill", "slots", "expected_actions", "tail_action", "tail_args"),
+    [
+        (
+            "VIEW_USER_PROFILE",
+            {"target": "dengbin", "source": "search"},
+            ["user.search", "user.get"],
+            "user.get",
+            {"user_id": "$search_user.items[0].id"},
+        ),
+        (
+            "CHECK_FRIENDSHIP",
+            {"target": "dengbin", "source": "search"},
+            ["user.search", "friend.check"],
+            "friend.check",
+            {"user_id": "$search_user.items[0].id"},
+        ),
+        (
+            "LIST_USER_MOMENTS",
+            {"target": "dengbin", "source": "search", "page": 1, "size": 20},
+            ["user.search", "moment.list"],
+            "moment.list",
+            {"user_id": "$search_user.items[0].id", "page": 1, "size": 20},
+        ),
+    ],
+)
+def test_search_based_read_skills_compile_lookup_then_read(
+    skill: str,
+    slots: dict,
+    expected_actions: list[str],
+    tail_action: str,
+    tail_args: dict,
+) -> None:
+    result = _compile(skill, slots)
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == expected_actions
+    assert _step(result.plan, "user.search").args == {"keyword": "dengbin", "page": 1, "size": 10}
+    assert _step(result.plan, tail_action).args == tail_args
+    assert _validator().validate(result.plan).allowed
+
+
+def test_view_group_skill_can_resolve_named_group_before_detail_read() -> None:
+    result = _compile("VIEW_GROUP", {"target": "项目群", "source": "contact"})
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == ["contact.resolve", "group.get"]
+    assert _step(result.plan, "contact.resolve").args == {"queries": ["项目群"], "allow_multiple": False}
+    assert _step(result.plan, "group.get").args == {"group_id": "$resolve_group.groups[0].id"}
+    assert _validator().validate(result.plan).allowed
+
+
+@pytest.mark.parametrize(
+    ("skill", "action", "operation"),
+    [
+        ("ACCEPT_FRIEND_REQUEST", "friend.request.accept", "接受好友申请"),
+        ("REJECT_FRIEND_REQUEST", "friend.request.reject", "拒绝好友申请"),
+    ],
+)
+def test_friend_request_decision_skills_compile_to_confirmed_write(skill: str, action: str, operation: str) -> None:
+    result = _compile(skill, {"request_id": "req-1"})
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == ["user.confirm", action]
+    assert _step(result.plan, "user.confirm").args == {
+        "risk": "high",
+        "preview": {"operation": operation, "target": "req-1", "content": operation},
+    }
+    assert _step(result.plan, action).args == {
+        "request_id": "req-1",
+        "preview": "$confirm_request.preview",
+        "idempotency_key": "$confirm_request.preview_fingerprint",
     }
     assert _validator().validate(result.plan).allowed
 
@@ -129,6 +269,27 @@ def test_memory_qa_skill_compiles_to_resolve_search_and_summarize() -> None:
     assert _step(result.plan, "memory.search").args["keywords"] == []
     assert _step(result.plan, "memory.search").args["time_scope"] == {"type": "all_history"}
     assert _step(result.plan, "memory.summarize").args["source"] == "$search_memory"
+    assert _validator().validate(result.plan).allowed
+
+
+def test_memory_qa_skill_without_participants_skips_contact_resolve() -> None:
+    result = _compiler().compile(
+        SkillIntent(
+            type="skill",
+            skill="MEMORY_QA",
+            goal="总结最近发过的合同文件内容",
+            slots={"question": "总结最近发过的合同文件内容", "keywords": ["合同", "文件"]},
+        )
+    )
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == [
+        "memory.search",
+        "memory.summarize",
+    ]
+    assert _step(result.plan, "memory.search").args["participants"] == []
+    assert _step(result.plan, "memory.search").args["keywords"] == ["合同", "文件"]
     assert _validator().validate(result.plan).allowed
 
 

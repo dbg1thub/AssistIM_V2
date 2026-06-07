@@ -796,8 +796,6 @@ class AIActionWorkflow:
     """Plan, validate, execute, pause, and resume assistant actions."""
 
     PENDING_CONFIRMATION_TTL_SECONDS = 120
-    READ_ONLY_SKILL_IDS = frozenset({"SEARCH_USER", "VIEW_USER_PROFILE", "MEMORY_QA"})
-
     def __init__(
         self,
         *,
@@ -1188,7 +1186,7 @@ class AIActionWorkflow:
         if intent_type != "skill":
             logger.info("[ai-diag] ai_skill_layer_fallback reason=intent_type intent_type=%s", intent_type)
             return None
-        if skill_id not in self.READ_ONLY_SKILL_IDS:
+        if not self._is_read_only_skill(skill_id):
             logger.info("[ai-diag] ai_skill_layer_fallback reason=non_read_only_skill skill=%s", skill_id)
             return None
         result = self._skill_compiler.compile(intent)
@@ -1202,6 +1200,12 @@ class AIActionWorkflow:
             return None
         logger.info("[ai-diag] ai_skill_layer_plan_built skill=%s steps=%s", skill_id, len(result.plan.steps))
         return result.plan
+
+    def _is_read_only_skill(self, skill_id: str) -> bool:
+        spec = self._skill_compiler.registry.get(skill_id)
+        if spec is None or not spec.enabled:
+            return False
+        return spec.risk_level == "low" and not spec.requires_confirmation
 
     async def _repair_invalid_plan(
         self,

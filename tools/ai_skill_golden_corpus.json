@@ -14,13 +14,142 @@
       }
     },
     {
-      "name": "skill_view_user_profile",
+      "name": "skill_view_user_profile_by_name",
       "user_input": "查看 dengbin 的资料",
       "expectation": {
         "type": "skill",
         "skill": "VIEW_USER_PROFILE",
         "slots": {
           "target": "dengbin"
+        }
+      }
+    },
+    {
+      "name": "skill_view_user_profile_by_id",
+      "user_input": "查看 user-3 的资料",
+      "expectation": {
+        "type": "skill",
+        "skill": "VIEW_USER_PROFILE",
+        "slots": {
+          "target": "user-3",
+          "source": "user_id"
+        }
+      }
+    },
+    {
+      "name": "skill_list_friends",
+      "user_input": "我现在有哪些好友？",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_FRIENDS"
+      }
+    },
+    {
+      "name": "skill_check_friendship",
+      "user_input": "检查我和 user-3 是否是好友",
+      "expectation": {
+        "type": "skill",
+        "skill": "CHECK_FRIENDSHIP",
+        "slots": {
+          "target": "user-3",
+          "source": "user_id"
+        }
+      }
+    },
+    {
+      "name": "skill_list_friend_requests",
+      "user_input": "有没有新的好友申请？",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_FRIEND_REQUESTS"
+      }
+    },
+    {
+      "name": "skill_list_groups",
+      "user_input": "我有哪些群？",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_GROUPS"
+      }
+    },
+    {
+      "name": "skill_view_group",
+      "user_input": "查看 group-1 这个群的信息",
+      "expectation": {
+        "type": "skill",
+        "skill": "VIEW_GROUP",
+        "slots": {
+          "target": "group-1",
+          "source": "group_id"
+        }
+      }
+    },
+    {
+      "name": "skill_list_sessions",
+      "user_input": "我最近有哪些会话？",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_SESSIONS"
+      }
+    },
+    {
+      "name": "skill_view_session",
+      "user_input": "查看 session-1 的会话信息",
+      "expectation": {
+        "type": "skill",
+        "skill": "VIEW_SESSION",
+        "slots": {
+          "session_id": "session-1"
+        }
+      }
+    },
+    {
+      "name": "skill_list_session_messages",
+      "user_input": "查看 session-1 最近 20 条消息",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_SESSION_MESSAGES",
+        "slots": {
+          "session_id": "session-1",
+          "limit": 20
+        }
+      }
+    },
+    {
+      "name": "skill_list_uploaded_files",
+      "user_input": "列一下我上传过的文件",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_UPLOADED_FILES"
+      }
+    },
+    {
+      "name": "skill_list_moments",
+      "user_input": "最近朋友圈有什么？",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_MOMENTS"
+      }
+    },
+    {
+      "name": "skill_list_user_moments",
+      "user_input": "查看 dengbin 的朋友圈",
+      "expectation": {
+        "type": "skill",
+        "skill": "LIST_USER_MOMENTS",
+        "slots": {
+          "target": "dengbin"
+        }
+      }
+    },
+    {
+      "name": "skill_view_moment",
+      "user_input": "查看 moment-1 这条朋友圈详情",
+      "expectation": {
+        "type": "skill",
+        "skill": "VIEW_MOMENT",
+        "slots": {
+          "moment_id": "moment-1"
         }
       }
     },
@@ -49,7 +178,29 @@
       }
     },
     {
-      "name": "skill_memory_qa",
+      "name": "skill_accept_friend_request",
+      "user_input": "接受 req-1 这个好友申请",
+      "expectation": {
+        "type": "skill",
+        "skill": "ACCEPT_FRIEND_REQUEST",
+        "slots": {
+          "request_id": "req-1"
+        }
+      }
+    },
+    {
+      "name": "skill_reject_friend_request",
+      "user_input": "拒绝 req-1 这个好友申请",
+      "expectation": {
+        "type": "skill",
+        "skill": "REJECT_FRIEND_REQUEST",
+        "slots": {
+          "request_id": "req-1"
+        }
+      }
+    },
+    {
+      "name": "skill_memory_qa_contact",
       "user_input": "我和 dengbin 之前聊过什么？",
       "expectation": {
         "type": "skill",
@@ -57,6 +208,14 @@
         "slots": {
           "participants": ["dengbin"]
         }
+      }
+    },
+    {
+      "name": "skill_memory_qa_file",
+      "user_input": "帮我总结一下最近发过的合同文件内容",
+      "expectation": {
+        "type": "skill",
+        "skill": "MEMORY_QA"
       }
     },
     {
@@ -69,6 +228,34 @@
     {
       "name": "unsupported_create_group",
       "user_input": "帮我建一个群，把 dengbin 拉进去",
+      "expectation": {
+        "type": "unsupported"
+      }
+    },
+    {
+      "name": "unsupported_delete_database",
+      "user_input": "帮我删除服务器数据库",
+      "expectation": {
+        "type": "unsupported"
+      }
+    },
+    {
+      "name": "unsupported_recall_message",
+      "user_input": "帮我撤回刚才那条消息",
+      "expectation": {
+        "type": "unsupported"
+      }
+    },
+    {
+      "name": "unsupported_upload_file",
+      "user_input": "帮我上传桌面文件",
+      "expectation": {
+        "type": "unsupported"
+      }
+    },
+    {
+      "name": "unsupported_create_moment",
+      "user_input": "帮我发一条朋友圈",
       "expectation": {
         "type": "unsupported"
       }
