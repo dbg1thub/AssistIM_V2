@@ -1,9 +1,22 @@
+import asyncio
+from types import SimpleNamespace
+
 from client.managers.ai_skill_compiler import AISkillCompiler
 from client.managers.ai_skill_parser import AISkillParser, parse_skill_intent_json
 
 
 def _parser() -> AISkillParser:
     return AISkillParser(registry=AISkillCompiler().registry)
+
+
+class _FakeTaskManager:
+    def __init__(self, raw_output: str) -> None:
+        self.raw_output = raw_output
+        self.requests = []
+
+    async def run_once(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(content=self.raw_output, provider="fake", model="skill-parser-test")
 
 
 def test_parse_skill_intent_json_accepts_registered_skill_and_slots() -> None:
@@ -141,3 +154,39 @@ def test_skill_parser_schema_does_not_allow_atomic_action_fields() -> None:
         "SEND_MESSAGE",
         "VIEW_USER_PROFILE",
     ]
+
+
+def test_skill_parser_parse_with_model_builds_strict_local_request() -> None:
+    task_manager = _FakeTaskManager(
+        """
+        {
+          "type": "skill",
+          "skill": "SEARCH_USER",
+          "goal": "搜索用户 dengbin",
+          "slots": {"keyword": "dengbin"},
+          "confidence": "high"
+        }
+        """
+    )
+
+    intent = asyncio.run(_parser().parse_with_model("在 AssistIM 里搜索用户 dengbin", task_manager=task_manager))
+
+    assert intent is not None
+    assert intent.type == "skill"
+    assert intent.skill == "SEARCH_USER"
+    assert intent.slots == {"keyword": "dengbin"}
+    assert len(task_manager.requests) == 1
+    request = task_manager.requests[0]
+    assert request.must_be_local is True
+    assert request.stream is False
+    assert request.temperature == 0.0
+    assert request.response_format["schema"]["properties"]["skill"]["enum"] == [
+        "MEMORY_QA",
+        "SEARCH_USER",
+        "SEND_FRIEND_REQUEST",
+        "SEND_MESSAGE",
+        "VIEW_USER_PROFILE",
+    ]
+    assert request.metadata["source"] == "ai_skill_parser"
+    assert request.metadata["skill_schema_version"] == AISkillParser.SCHEMA_VERSION
+    assert "steps" not in request.system_prompt

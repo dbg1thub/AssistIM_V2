@@ -32,6 +32,42 @@ class AISkillParser:
     def parse(self, raw_output: str) -> SkillIntent | None:
         return parse_skill_intent_json(raw_output, registry=self._registry)
 
+    async def parse_with_model(
+        self,
+        user_text: str,
+        *,
+        task_manager: Any,
+        max_tokens: int = 512,
+        strict: bool = True,
+    ) -> SkillIntent | None:
+        request = self.build_request(user_text, max_tokens=max_tokens, strict=strict)
+        snapshot = await task_manager.run_once(request)
+        return self.parse(str(getattr(snapshot, "content", "") or ""))
+
+    def build_request(self, user_text: str, *, max_tokens: int = 512, strict: bool = True) -> Any:
+        from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+
+        return AIRequest(
+            task_id="ai-skill-parse",
+            task_type=AITaskType.CHAT,
+            privacy_scope=AIPrivacyScope.GENERAL,
+            must_be_local=True,
+            stream=False,
+            temperature=0.0,
+            max_tokens=max(1, int(max_tokens or 1)),
+            response_format={"type": "json_object", "schema": self.build_schema()} if strict else None,
+            priority=4,
+            system_prompt=self.system_prompt(),
+            messages=[{"role": "user", "content": self.user_prompt(user_text)}],
+            metadata={
+                "source": "ai_skill_parser",
+                "skill_schema_version": self.SCHEMA_VERSION,
+                "skill_prompt_version": self.PROMPT_VERSION,
+                "registered_skills": list(self._registry.names()),
+                "strict_json": bool(strict),
+            },
+        )
+
     def build_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
@@ -53,7 +89,7 @@ class AISkillParser:
         return (
             "你是 AssistIM 的 Skill 意图解析器。只输出 JSON object。\n"
             "你只能输出 type=skill、unsupported 或 clarification。\n"
-            "skill 必须从已注册 Skill 中选择；禁止输出 steps、action、args、depends_on、final。\n"
+            "skill 必须从已注册 Skill 中选择；禁止输出原子动作链或执行步骤。\n"
             "你只负责语义分类和 slot 抽取，不负责生成执行步骤。"
         )
 

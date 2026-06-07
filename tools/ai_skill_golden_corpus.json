@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "description": "Golden corpus for offline AI skill parser evaluation. It is not used by runtime routing.",
+  "cases": [
+    {
+      "name": "skill_search_user",
+      "user_input": "在 AssistIM 里搜索用户 dengbin",
+      "expectation": {
+        "type": "skill",
+        "skill": "SEARCH_USER",
+        "slots": {
+          "keyword": "dengbin"
+        }
+      }
+    },
+    {
+      "name": "skill_view_user_profile",
+      "user_input": "查看 dengbin 的资料",
+      "expectation": {
+        "type": "skill",
+        "skill": "VIEW_USER_PROFILE",
+        "slots": {
+          "target": "dengbin"
+        }
+      }
+    },
+    {
+      "name": "skill_send_message",
+      "user_input": "给 dengbin 说我晚点联系他",
+      "expectation": {
+        "type": "skill",
+        "skill": "SEND_MESSAGE",
+        "slots": {
+          "target": "dengbin",
+          "content": "我晚点联系他"
+        }
+      }
+    },
+    {
+      "name": "skill_send_friend_request",
+      "user_input": "加 dengbin 为好友，备注我是 test1",
+      "expectation": {
+        "type": "skill",
+        "skill": "SEND_FRIEND_REQUEST",
+        "slots": {
+          "keyword": "dengbin",
+          "message": "我是 test1"
+        }
+      }
+    },
+    {
+      "name": "skill_memory_qa",
+      "user_input": "我和 dengbin 之前聊过什么？",
+      "expectation": {
+        "type": "skill",
+        "skill": "MEMORY_QA",
+        "slots": {
+          "participants": ["dengbin"]
+        }
+      }
+    },
+    {
+      "name": "unsupported_delete_friend",
+      "user_input": "帮我删除 dengbin 好友",
+      "expectation": {
+        "type": "unsupported"
+      }
+    },
+    {
+      "name": "unsupported_create_group",
+      "user_input": "帮我建一个群，把 dengbin 拉进去",
+      "expectation": {
+        "type": "unsupported"
+      }
+    }
+  ]
+}
