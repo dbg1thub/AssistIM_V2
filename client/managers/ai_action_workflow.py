@@ -38,6 +38,8 @@ from client.managers.ai_action_types import (
 )
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.managers.ai_task_manager import get_ai_task_manager
+from client.managers.ai_skill_compiler import AISkillCompiler
+from client.managers.ai_skill_parser import AISkillParser
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
 from client.storage.database import Database, get_database
@@ -794,6 +796,7 @@ class AIActionWorkflow:
     """Plan, validate, execute, pause, and resume assistant actions."""
 
     PENDING_CONFIRMATION_TTL_SECONDS = 120
+    READ_ONLY_SKILL_IDS = frozenset({"SEARCH_USER", "VIEW_USER_PROFILE", "MEMORY_QA"})
 
     def __init__(
         self,
@@ -801,6 +804,9 @@ class AIActionWorkflow:
         action_store: AIActionStore | AIActionPlanStore | None = None,
         planner: AIActionPlanner | None = None,
         task_manager: Any | None = None,
+        skill_parser: Any | None = None,
+        skill_compiler: AISkillCompiler | None = None,
+        skill_layer_enabled: bool = False,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
         memory_summarizer: Any | None = None,
@@ -813,6 +819,7 @@ class AIActionWorkflow:
         resolved_task_manager = task_manager
         if resolved_task_manager is None and (planner is None or memory_summarizer is None):
             resolved_task_manager = get_ai_task_manager()
+        self._task_manager = resolved_task_manager
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
         self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider
@@ -842,6 +849,9 @@ class AIActionWorkflow:
             action_registry=self._registry,
             registered_action_names=self._registry.names(),
         )
+        self._skill_layer_enabled = bool(skill_layer_enabled)
+        self._skill_compiler = skill_compiler or AISkillCompiler()
+        self._skill_parser = skill_parser or AISkillParser(registry=self._skill_compiler.registry)
         self._resource_manager = AIResourceManager(registry=self._registry)
         self._validator = AIPlanValidator(registry=self._registry)
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
@@ -1147,11 +1157,51 @@ class AIActionWorkflow:
         )
 
     async def _build_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan:
+        skill_plan = await self._build_skill_plan(user_text, pending_state=pending_state)
+        if skill_plan is not None:
+            return skill_plan
         strict_plan = await self._planner.plan(user_text, pending_state=pending_state, strict=True)
         if strict_plan is not None:
             return strict_plan
         plan = await self._planner.plan(user_text, pending_state=pending_state, strict=False)
         return plan or AIActionPlan(is_action=False)
+
+    async def _build_skill_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan | None:
+        if not self._skill_layer_enabled:
+            return None
+        if pending_state is not None:
+            logger.info("[ai-diag] ai_skill_layer_skipped reason=pending_state")
+            return None
+        if self._task_manager is None:
+            logger.info("[ai-diag] ai_skill_layer_skipped reason=task_manager_missing")
+            return None
+        parse = getattr(self._skill_parser, "parse_with_model", None)
+        if not callable(parse):
+            logger.info("[ai-diag] ai_skill_layer_skipped reason=parser_unavailable")
+            return None
+        intent = await parse(user_text, task_manager=self._task_manager, max_tokens=512, strict=True)
+        if intent is None:
+            logger.info("[ai-diag] ai_skill_layer_fallback reason=parse_empty")
+            return None
+        intent_type = str(getattr(intent, "type", "") or "").strip()
+        skill_id = str(getattr(intent, "skill", "") or "").strip()
+        if intent_type != "skill":
+            logger.info("[ai-diag] ai_skill_layer_fallback reason=intent_type intent_type=%s", intent_type)
+            return None
+        if skill_id not in self.READ_ONLY_SKILL_IDS:
+            logger.info("[ai-diag] ai_skill_layer_fallback reason=non_read_only_skill skill=%s", skill_id)
+            return None
+        result = self._skill_compiler.compile(intent)
+        if result.type != "plan" or result.plan is None:
+            logger.info(
+                "[ai-diag] ai_skill_layer_fallback reason=compile_%s skill=%s missing_slots=%s",
+                result.type,
+                skill_id,
+                ",".join(result.missing_slots),
+            )
+            return None
+        logger.info("[ai-diag] ai_skill_layer_plan_built skill=%s steps=%s", skill_id, len(result.plan.steps))
+        return result.plan
 
     async def _repair_invalid_plan(
         self,

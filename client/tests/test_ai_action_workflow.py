@@ -26,6 +26,7 @@ from client.managers.ai_action_workflow import (
     ContactAliasResolver,
     PendingPlannerState,
 )
+from client.managers.ai_skill_types import SkillIntent
 from client.models.message import MessageStatus, Session
 from client.storage.ai_action_store import AIActionStore
 from client.storage.database import Database
@@ -335,6 +336,26 @@ class _WorkflowPlanner:
         return AIActionPlan(is_action=False)
 
 
+class _WorkflowSkillParser:
+    def __init__(self, intent: SkillIntent | None) -> None:
+        self.intent = intent
+        self.calls: list[dict] = []
+
+    async def parse_with_model(self, user_text: str, **kwargs):
+        self.calls.append({"user_text": user_text, **dict(kwargs)})
+        return self.intent
+
+
+class _WorkflowFallbackPlanner:
+    def __init__(self, plan: AIActionPlan | None = None) -> None:
+        self.plan_result = plan or AIActionPlan(is_action=False)
+        self.calls: list[dict] = []
+
+    async def plan(self, user_text: str, **kwargs):
+        self.calls.append({"user_text": user_text, **dict(kwargs)})
+        return self.plan_result
+
+
 class _PendingNonControlPlanner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
@@ -427,6 +448,101 @@ def _atomic_send_plan(*, user_text: str = "帮我给张三发我晚点到") -> A
         ),
         final={"type": "answer", "source": "$send_message.text"},
     )
+
+
+def test_ai_action_workflow_build_plan_uses_read_only_skill_layer_when_enabled() -> None:
+    async def scenario() -> None:
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEARCH_USER",
+                goal="搜索用户 dengbin",
+                slots={"keyword": "dengbin"},
+                confidence="high",
+            )
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        workflow = AIActionWorkflow(
+            action_store=SimpleNamespace(),
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            skill_parser=parser,
+            skill_layer_enabled=True,
+        )
+
+        plan = await workflow._build_plan("搜索用户 dengbin", pending_state=None)
+
+        assert [step.action for step in plan.steps] == ["user.search"]
+        assert plan.steps[0].args == {"keyword": "dengbin", "page": 1, "size": 10}
+        assert planner.calls == []
+        assert parser.calls
+        assert parser.calls[0]["user_text"] == "搜索用户 dengbin"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_build_plan_falls_back_for_write_skill_layer_intent() -> None:
+    async def scenario() -> None:
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEND_MESSAGE",
+                goal="给 dengbin 发消息",
+                slots={"target": "dengbin", "content": "晚点联系你"},
+                confidence="high",
+            )
+        )
+        fallback_plan = AIActionPlan(is_action=False, goal="fallback")
+        planner = _WorkflowFallbackPlanner(fallback_plan)
+        workflow = AIActionWorkflow(
+            action_store=SimpleNamespace(),
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            skill_parser=parser,
+            skill_layer_enabled=True,
+        )
+
+        plan = await workflow._build_plan("给 dengbin 说晚点联系你", pending_state=None)
+
+        assert plan == fallback_plan
+        assert parser.calls
+        assert len(planner.calls) == 1
+        assert planner.calls[0]["strict"] is True
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_build_plan_skips_skill_layer_when_disabled() -> None:
+    async def scenario() -> None:
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEARCH_USER",
+                goal="搜索用户 dengbin",
+                slots={"keyword": "dengbin"},
+            )
+        )
+        fallback_plan = AIActionPlan(is_action=False, goal="fallback")
+        planner = _WorkflowFallbackPlanner(fallback_plan)
+        workflow = AIActionWorkflow(
+            action_store=SimpleNamespace(),
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            memory_summarizer=_FakeMemorySummarizer(),
+            skill_parser=parser,
+            skill_layer_enabled=False,
+        )
+
+        plan = await workflow._build_plan("搜索用户 dengbin", pending_state=None)
+
+        assert plan == fallback_plan
+        assert parser.calls == []
+        assert len(planner.calls) == 1
+        assert planner.calls[0]["strict"] is True
+
+    asyncio.run(scenario())
 
 
 class _InvalidConfirmationPlanner:
