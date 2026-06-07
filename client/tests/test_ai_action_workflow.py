@@ -26,6 +26,7 @@ from client.managers.ai_action_workflow import (
     ContactAliasResolver,
     PendingPlannerState,
 )
+from client.managers.ai_pending_control_parser import AIPendingControlDecision
 from client.managers.ai_skill_types import SkillIntent
 from client.models.message import MessageStatus, Session
 from client.storage.ai_action_store import AIActionStore
@@ -354,6 +355,16 @@ class _WorkflowIntentGate:
     async def classify(self, user_text: str, **kwargs):
         self.calls.append({"user_text": user_text, **dict(kwargs)})
         return SimpleNamespace(is_action=self.is_action, confidence="high", reason="test")
+
+
+class _WorkflowPendingParser:
+    def __init__(self, decision: AIPendingControlDecision | None) -> None:
+        self.decision = decision
+        self.calls: list[dict] = []
+
+    async def parse_with_model(self, user_text: str, **kwargs):
+        self.calls.append({"user_text": user_text, **dict(kwargs)})
+        return self.decision
 
 
 class _WorkflowFallbackPlanner:
@@ -4513,6 +4524,188 @@ def test_ai_action_workflow_skill_clarification_creates_pending_plan(tmp_path, m
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_fills_skill_clarification_without_legacy_planner(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEND_MESSAGE",
+                goal="发送消息",
+                slots={"content": "我晚点到"},
+                confidence="high",
+            )
+        )
+        pending_parser = _WorkflowPendingParser(
+            AIPendingControlDecision(type="fill_slots", slots={"target": "张三"})
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
+            pending_control_parser=pending_parser,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=_FakeActionMessageSender(),
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我发我晚点到")
+            assert first.handled is True
+            assert first.message_extra["ai_action"]["state"] == "waiting_clarification"
+            first_plan = await store.get_plan(first.message_extra["ai_action"]["plan_id"])
+            assert first_plan is not None
+            assert first_plan.waiting_payload["skill"] == "SEND_MESSAGE"
+            assert first_plan.waiting_payload["slots"] == {"content": "我晚点到"}
+            assert first_plan.waiting_payload["missing_slots"] == ["target"]
+
+            second = await workflow.handle_user_turn(thread_id="thread-1", text="发给张三")
+            latest = await store.get_plan(first.message_extra["ai_action"]["plan_id"])
+
+            assert second.handled is True
+            assert second.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert "确认要发送消息给张三" in second.response_text
+            assert latest is not None
+            assert latest.state == "waiting_confirmation"
+            assert latest.waiting_payload["type"] == "confirmation"
+            assert latest.plan_version == 2
+            assert pending_parser.calls[0]["pending_state"].state == "waiting_clarification"
+            assert len(parser.calls) == 1
+            assert planner.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_selects_ambiguous_contact_without_legacy_planner(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        parser = _WorkflowSkillParser(
+            SkillIntent(
+                type="skill",
+                skill="SEND_MESSAGE",
+                goal="发送消息",
+                slots={"target": "张三", "content": "我晚点到"},
+                confidence="high",
+            )
+        )
+        planner = _WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback"))
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan-a",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan-a",
+                },
+                {
+                    "id": "user-2",
+                    "display_name": "张三",
+                    "username": "zhangsan-b",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan-b",
+                },
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            task_manager=_FakePlannerTaskManager("{}"),
+            intent_gate=_WorkflowIntentGate(True),
+            skill_parser=parser,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=_FakeActionMessageSender(),
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="给张三说我晚点到")
+            assert first.handled is True
+            assert first.message_extra["ai_action"]["state"] == "waiting_clarification"
+            assert first.message_extra["ai_action"]["waiting"]["type"] == "contact_ambiguity"
+
+            second = await workflow.handle_user_turn(thread_id="thread-1", text="第2个")
+            latest = await store.get_plan(first.message_extra["ai_action"]["plan_id"])
+
+            assert second.handled is True
+            assert second.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert latest is not None
+            assert latest.step_outputs["resolve_target"]["contacts"][0]["contact_id"] == "user-2"
+            assert latest.current_step_id == "confirm_send"
+            assert planner.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_does_not_resume_resource_limit_clarification_from_slots(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        pending_parser = _WorkflowPendingParser(
+            AIPendingControlDecision(type="fill_slots", slots={"target": "张三"})
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowFallbackPlanner(AIActionPlan(is_action=False, goal="fallback")),
+            pending_control_parser=pending_parser,
+            message_sender=_FakeActionMessageSender(),
+        )
+        plan = _atomic_send_plan(user_text="帮我给张三发我晚点到")
+        record = await store.create_plan(
+            thread_id="thread-1",
+            goal=plan.goal,
+            plan_json=plan.to_dict(),
+            state="waiting_clarification",
+            reason="resource_limit",
+        )
+        await store.update_plan(
+            record.id,
+            waiting_payload={
+                "type": "clarification",
+                "reason": "resource_limit",
+                "resource_reason": "too_many_steps",
+                "response_text": "步骤太多，请缩小范围。",
+            },
+            bump_version=False,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="发给张三")
+            latest = await store.get_plan(record.id)
+
+            assert result.handled is True
+            assert "资源限制" in result.response_text
+            assert latest is not None
+            assert latest.state == "waiting_clarification"
+            assert latest.step_outputs == {}
+            assert pending_parser.calls
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_rejects_legacy_single_business_actions(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
@@ -7445,9 +7638,10 @@ def test_ai_action_workflow_sends_message_after_confirmation(tmp_path, monkeypat
             ]
         )
         message_sender = _FakeActionMessageSender()
+        planner = _WorkflowPlanner()
         workflow = AIActionWorkflow(
             action_store=store,
-            planner=_WorkflowPlanner(),
+            planner=planner,
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             message_sender=message_sender,
         )
@@ -7469,6 +7663,7 @@ def test_ai_action_workflow_sends_message_after_confirmation(tmp_path, monkeypat
             assert message_sender.calls[0]["content"] == "我晚点到"
             assert message_sender.calls[0]["idempotency_key"]
             assert len(contact_db.resolve_calls) == 1
+            assert planner.calls == [("帮我给张三发我晚点到", False)]
         finally:
             await db.close()
 
@@ -7929,7 +8124,7 @@ def test_ai_action_message_sender_requires_existing_direct_session() -> None:
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_waits_for_planner_control_before_confirming_pending_write(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_confirms_pending_write_without_legacy_pending_planner(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
@@ -7959,12 +8154,13 @@ def test_ai_action_workflow_waits_for_planner_control_before_confirming_pending_
             assert first.message_extra["ai_action"]["state"] == "waiting_confirmation"
 
             second = await workflow.handle_user_turn(thread_id="thread-1", text="确认")
-            assert second.handled is False
             record = await store.get_plan(plan_id)
+            assert second.handled is True
+            assert second.message_extra["ai_action"]["state"] == "done"
             assert record is not None
-            assert record.state == "waiting_confirmation"
-            assert "confirm_send" not in record.step_outputs
-            assert planner.calls[-1] == ("确认", True)
+            assert record.state == "done"
+            assert "confirm_send" in record.step_outputs
+            assert planner.calls == [("帮我给张三发我晚点到", False)]
         finally:
             await db.close()
 

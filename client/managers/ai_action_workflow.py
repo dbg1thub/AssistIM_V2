@@ -17,6 +17,7 @@ from client.managers.ai_action_intent_gate import AIActionIntentGate
 from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
+from client.managers.ai_pending_control_parser import AIPendingControlParser
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
 from client.managers.ai_action_registry import (
     AtomicActionRegistry,
@@ -41,6 +42,7 @@ from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanVa
 from client.managers.ai_task_manager import get_ai_task_manager
 from client.managers.ai_skill_compiler import AISkillCompiler
 from client.managers.ai_skill_parser import AISkillParser
+from client.managers.ai_skill_types import SkillIntent
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
 from client.storage.database import Database, get_database
@@ -806,6 +808,7 @@ class AIActionWorkflow:
         intent_gate: Any | None = None,
         skill_parser: Any | None = None,
         skill_compiler: AISkillCompiler | None = None,
+        pending_control_parser: Any | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
         memory_summarizer: Any | None = None,
@@ -852,6 +855,7 @@ class AIActionWorkflow:
         self._intent_gate = intent_gate or AIActionIntentGate()
         self._skill_compiler = skill_compiler or AISkillCompiler()
         self._skill_parser = skill_parser or AISkillParser(registry=self._skill_compiler.registry)
+        self._pending_control_parser = pending_control_parser or AIPendingControlParser()
         self._resource_manager = AIResourceManager(registry=self._registry)
         self._validator = AIPlanValidator(registry=self._registry)
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
@@ -1151,7 +1155,9 @@ class AIActionWorkflow:
         )
 
     async def _build_plan(self, user_text: str, *, pending_state: Any | None) -> AIActionPlan:
-        if pending_state is not None or self._legacy_planner_for_new_turns:
+        if pending_state is not None:
+            return await self._build_pending_control_plan(user_text, pending_state=pending_state)
+        if self._legacy_planner_for_new_turns:
             return await self._build_legacy_plan(user_text, pending_state=pending_state)
         return await self._build_skill_plan(user_text)
 
@@ -1161,6 +1167,42 @@ class AIActionWorkflow:
             return strict_plan
         plan = await self._planner.plan(user_text, pending_state=pending_state, strict=False)
         return plan or AIActionPlan(is_action=False)
+
+    async def _build_pending_control_plan(self, user_text: str, *, pending_state: Any) -> AIActionPlan:
+        parse = getattr(self._pending_control_parser, "parse_with_model", None)
+        if not callable(parse):
+            logger.info("[ai-diag] ai_pending_control_unavailable reason=parser_missing")
+            return AIActionPlan(is_action=False)
+        decision = await parse(
+            user_text,
+            pending_state=pending_state,
+            task_manager=self._task_manager,
+            max_tokens=256,
+            strict=True,
+        )
+        if decision is None:
+            logger.info("[ai-diag] ai_pending_control_empty")
+            return AIActionPlan(is_action=False)
+        control_type = str(getattr(decision, "type", "") or "").strip()
+        if control_type == "unrelated":
+            return AIActionPlan(is_action=False)
+        control: dict[str, Any] = {"type": control_type}
+        selection_index = getattr(decision, "selection_index", None)
+        if selection_index is not None:
+            control["selection_index"] = selection_index
+        contact_id = str(getattr(decision, "contact_id", "") or "").strip()
+        if contact_id:
+            control["contact_id"] = contact_id
+        alias_text = str(getattr(decision, "alias_text", "") or "").strip()
+        if alias_text:
+            control["alias_text"] = alias_text
+        slots = getattr(decision, "slots", None)
+        if isinstance(slots, dict) and slots:
+            control["slots"] = dict(slots)
+        reason = str(getattr(decision, "reason", "") or "").strip()
+        if reason:
+            control["reason"] = reason
+        return AIActionPlan(is_action=True, control=control)
 
     async def _build_skill_plan(self, user_text: str) -> AIActionPlan:
         if self._task_manager is None:
@@ -1221,6 +1263,8 @@ class AIActionWorkflow:
                     "reason": str(getattr(intent, "reason", "") or ""),
                     "missing_slots": list(control.get("missing_slots") or []),
                     "question": str(control.get("question") or ""),
+                    "skill": skill_id,
+                    "slots": dict(getattr(intent, "slots", {}) or {}),
                 },
             )
         if intent_type != "skill":
@@ -1252,6 +1296,8 @@ class AIActionWorkflow:
                     "reason": result.reason,
                     "missing_slots": list(result.missing_slots),
                     "question": result.question,
+                    "skill": skill_id,
+                    "slots": dict(getattr(intent, "slots", {}) or {}),
                 },
             )
         if result.type != "plan" or result.plan is None:
@@ -1381,6 +1427,8 @@ class AIActionWorkflow:
                 response_text,
                 missing_slots=missing_slots,
                 reason=str(control.get("reason") or "").strip(),
+                skill=str(control.get("skill") or "").strip(),
+                slots=dict(control.get("slots") or {}) if isinstance(control.get("slots"), dict) else {},
             )
         if control_type == "skill_parse_failed":
             reason = str(control.get("reason") or "无法解析这个 AssistIM 请求。").strip()
@@ -1459,7 +1507,141 @@ class AIActionWorkflow:
                     selection,
                     progress_callback=progress_callback,
                 )
+        if control_type == "fill_slots" and pending.state == "waiting_clarification":
+            slots = dict(control.get("slots") or {}) if isinstance(control.get("slots"), dict) else {}
+            waiting = dict(pending.waiting_payload or {})
+            if str(waiting.get("reason") or "").strip() == "resource_limit":
+                return self._resource_limit_pending_turn(pending)
+            if slots:
+                return await self._resume_skill_clarification(
+                    pending,
+                    slots,
+                    progress_callback=progress_callback,
+                )
         return None
+
+    @staticmethod
+    def _resource_limit_pending_turn(pending: AIActionPlanRecord) -> AIActionTurnResult:
+        return AIActionTurnResult(
+            handled=True,
+            response_text="这个操作因资源限制暂停，不能通过补充信息继续执行。请取消后重新发起更具体的请求。",
+            message_extra={"ai_action": AIActionWorkflow._extra(pending)},
+        )
+
+    async def _resume_skill_clarification(
+        self,
+        pending: AIActionPlanRecord,
+        slots: dict[str, Any],
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
+        waiting = dict(pending.waiting_payload or {})
+        skill = str(waiting.get("skill") or "").strip()
+        if not skill:
+            return AIActionTurnResult(
+                handled=True,
+                response_text=str(waiting.get("response_text") or "这个操作还在等待补充信息。"),
+                message_extra={"ai_action": self._extra(pending)},
+            )
+        merged_slots = dict(waiting.get("slots") or {}) if isinstance(waiting.get("slots"), dict) else {}
+        merged_slots.update(dict(slots or {}))
+        result = self._skill_compiler.compile(
+            SkillIntent(
+                type="skill",
+                skill=skill,
+                goal=str(pending.goal or ""),
+                slots=merged_slots,
+                confidence="medium",
+            )
+        )
+        if result.type == "clarification":
+            response_text = result.question or str(waiting.get("response_text") or "请继续补充必要信息。")
+            updated = await self._store.update_plan(
+                pending.id,
+                waiting_payload={
+                    **waiting,
+                    "skill": skill,
+                    "slots": merged_slots,
+                    "missing_slots": list(result.missing_slots),
+                    "response_text": response_text,
+                    "reason": "skill_clarification",
+                },
+                bump_version=False,
+            ) or pending
+            return AIActionTurnResult(
+                handled=True,
+                response_text=response_text,
+                message_extra={"ai_action": self._extra(updated)},
+            )
+        if result.type == "unsupported" or result.plan is None:
+            reason = result.reason or "这个 pending 操作无法继续执行，请取消后重新发起。"
+            return AIActionTurnResult(
+                handled=True,
+                response_text=reason,
+                message_extra={
+                    "ai_action": {
+                        **self._extra(pending),
+                        "state": "failed",
+                        "error_code": "UNSUPPORTED_SKILL",
+                        "reason": reason,
+                    }
+                },
+            )
+        return await self._replace_pending_with_plan(
+            pending,
+            result.plan,
+            progress_callback=progress_callback,
+        )
+
+    async def _replace_pending_with_plan(
+        self,
+        pending: AIActionPlanRecord,
+        plan: AIActionPlan,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
+        normalized_plan = self._normalizer.normalize(plan, user_text=str(pending.goal or ""))
+        if not normalized_plan.is_action or not normalized_plan.steps:
+            return AIActionTurnResult(handled=False)
+        validation = self._validator.validate(normalized_plan)
+        if not validation.allowed:
+            return self._invalid_plan_turn(validation, plan=normalized_plan)
+        optimized_plan, _optimize_reason = self._optimizer.optimize(normalized_plan)
+        optimized_validation = self._validator.validate(optimized_plan)
+        if not optimized_validation.allowed:
+            return self._invalid_plan_turn(optimized_validation, plan=optimized_plan)
+        resource = self._resource_manager.check_plan(optimized_plan)
+        if not resource.allowed:
+            updated = await self._store.update_plan(
+                pending.id,
+                waiting_payload={
+                    "type": "clarification",
+                    "reason": "resource_limit",
+                    "resource_reason": resource.reason,
+                    "resource_estimate": dict(resource.estimate or {}),
+                    "response_text": resource.response_text,
+                },
+                bump_version=False,
+            ) or pending
+            return AIActionTurnResult(
+                handled=True,
+                response_text=resource.response_text,
+                message_extra={"ai_action": self._extra(updated)},
+            )
+        updated = await self._store.update_plan(
+            pending.id,
+            state="running",
+            goal=optimized_plan.goal,
+            plan_json=optimized_plan.to_dict(),
+            reason="skill_clarification_filled",
+            step_outputs={},
+            waiting_payload={},
+            current_step_id="",
+            error_text="",
+            completed_at=0,
+        ) or pending
+        await self._emit_progress_turn(progress_callback, updated)
+        return await self._execute_to_turn(updated, progress_callback=progress_callback)
 
     async def _cancel_pending(
         self,
@@ -1690,6 +1872,8 @@ class AIActionWorkflow:
         *,
         missing_slots: tuple[str, ...],
         reason: str,
+        skill: str = "",
+        slots: dict[str, Any] | None = None,
     ) -> AIActionTurnResult:
         plan_json = plan.to_dict()
         record = await self._store.create_plan(
@@ -1704,6 +1888,8 @@ class AIActionWorkflow:
             waiting_payload={
                 "type": "clarification",
                 "reason": str(reason or "").strip(),
+                "skill": str(skill or "").strip(),
+                "slots": dict(slots or {}),
                 "missing_slots": list(missing_slots),
                 "response_text": response_text,
             },
