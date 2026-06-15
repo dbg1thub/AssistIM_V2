@@ -86,10 +86,22 @@ def test_reset_server_db_script_is_ubuntu_bash_with_explicit_confirmation() -> N
     assert "set -euo pipefail" in script
     assert "--confirm-reset" in script
     assert "CONFIRM_RESET" in script
+    assert "APP_ROOT=" in script
+    assert "select_default_env_file" in script
+    assert '"${SERVER_ROOT}/.env" "${APP_ROOT}/deploy/docker/server.env"' in script
+    assert "resolve_file_path" in script
+    assert '"${PWD}/${raw_path}" "${APP_ROOT}/${raw_path}" "${SERVER_ROOT}/${raw_path}"' in script
     assert "alembic upgrade head" in script
     assert "app.ops.seed_test_users" in script
     assert "DROP DATABASE IF EXISTS" in script
     assert "pg_terminate_backend" in script
+    assert "--compose-file PATH" in script
+    assert "has_docker_compose_database_config" in script
+    assert "run_docker_compose_reset" in script
+    assert "local -a dc" in script
+    assert 'docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE"' in script
+    assert '"${dc[@]}" up -d postgres' in script
+    assert 'DATABASE_URL is not set and Docker Compose database settings were not found' in script
 
 
 def test_reset_local_db_script_is_powershell_with_local_guard() -> None:

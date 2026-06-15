@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${SERVER_ROOT}/.env"
+APP_ROOT="$(cd "${SERVER_ROOT}/.." && pwd)"
+COMPOSE_FILE="${APP_ROOT}/deploy/docker/docker-compose.yml"
+ENV_FILE=""
 DATABASE_URL_OVERRIDE=""
 PYTHON_BIN="${ASSISTIM_PYTHON:-}"
 PSQL_BIN="${ASSISTIM_PSQL:-psql}"
@@ -15,8 +17,9 @@ Usage: reset-server-db.sh --confirm-reset [options]
 
 Options:
   --confirm-reset          Required. Drop and recreate the configured database.
-  --env-file PATH          Env file to load. Defaults to server/.env.
+  --env-file PATH          Env file to load. Defaults to server/.env, then deploy/docker/server.env.
   --database-url URL       Override DATABASE_URL from the env file.
+  --compose-file PATH      Docker Compose file. Defaults to deploy/docker/docker-compose.yml.
   --python PATH            Python executable. Defaults to ASSISTIM_PYTHON, server/.venv/bin/python, python3, then python.
   --psql PATH              psql executable. Defaults to ASSISTIM_PSQL or psql.
   -h, --help               Show this help.
@@ -28,6 +31,44 @@ trim() {
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     printf '%s' "$value"
+}
+
+absolute_path() {
+    local path="$1"
+    local dir base
+    dir="$(dirname "$path")"
+    base="$(basename "$path")"
+    printf '%s/%s' "$(cd "$dir" && pwd)" "$base"
+}
+
+select_default_env_file() {
+    local candidate
+    for candidate in "${SERVER_ROOT}/.env" "${APP_ROOT}/deploy/docker/server.env"; do
+        if [[ -f "$candidate" ]]; then
+            absolute_path "$candidate"
+            return
+        fi
+    done
+    printf '%s' "${SERVER_ROOT}/.env"
+}
+
+resolve_file_path() {
+    local raw_path="$1"
+    local candidate
+
+    if [[ "$raw_path" = /* ]]; then
+        printf '%s' "$raw_path"
+        return
+    fi
+
+    for candidate in "${PWD}/${raw_path}" "${APP_ROOT}/${raw_path}" "${SERVER_ROOT}/${raw_path}"; do
+        if [[ -f "$candidate" ]]; then
+            absolute_path "$candidate"
+            return
+        fi
+    done
+
+    printf '%s' "${PWD}/${raw_path}"
 }
 
 load_env_file() {
@@ -172,6 +213,42 @@ reset_sqlite_database() {
     rm -f "$resolved_path" "${resolved_path}-wal" "${resolved_path}-shm"
 }
 
+has_docker_compose_database_config() {
+    [[ -n "${POSTGRES_DB:-}" && -n "${POSTGRES_USER:-}" && -n "${POSTGRES_PASSWORD:-}" && -f "$COMPOSE_FILE" ]]
+}
+
+run_docker_compose_reset() {
+    local -a dc
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        dc=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+    else
+        echo "docker compose is required for env files without DATABASE_URL." >&2
+        exit 1
+    fi
+
+    echo "Target database:"
+    echo "  type: postgresql (docker compose)"
+    echo "  compose: ${COMPOSE_FILE}"
+    echo "  env: ${ENV_FILE}"
+    echo "  service: postgres"
+    echo "  name: ${POSTGRES_DB}"
+
+    "${dc[@]}" stop api
+    "${dc[@]}" up -d postgres
+    "${dc[@]}" exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -v target_db="$POSTGRES_DB"' <<'SQL'
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = :'target_db'
+  AND pid <> pg_backend_pid();
+
+DROP DATABASE IF EXISTS :"target_db";
+CREATE DATABASE :"target_db";
+SQL
+    "${dc[@]}" run --rm api python -m alembic -c alembic.ini upgrade head
+    "${dc[@]}" run --rm api python -m app.ops.seed_test_users
+    "${dc[@]}" up -d api
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --confirm-reset)
@@ -184,6 +261,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --database-url)
             DATABASE_URL_OVERRIDE="$2"
+            shift 2
+            ;;
+        --compose-file)
+            COMPOSE_FILE="$2"
             shift 2
             ;;
         --python)
@@ -206,8 +287,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$ENV_FILE" != /* ]]; then
-    ENV_FILE="${SERVER_ROOT}/${ENV_FILE}"
+if [[ -z "$ENV_FILE" ]]; then
+    ENV_FILE="$(select_default_env_file)"
+else
+    ENV_FILE="$(resolve_file_path "$ENV_FILE")"
+fi
+
+if [[ "$COMPOSE_FILE" != /* ]]; then
+    COMPOSE_FILE="$(resolve_file_path "$COMPOSE_FILE")"
 fi
 
 load_env_file "$ENV_FILE"
@@ -217,7 +304,16 @@ if [[ -n "$DATABASE_URL_OVERRIDE" ]]; then
 fi
 
 if [[ -z "${DATABASE_URL:-}" ]]; then
-    echo "DATABASE_URL is not set." >&2
+    if [[ "$CONFIRM_RESET" != "1" ]]; then
+        echo "Refusing to reset without --confirm-reset." >&2
+        exit 1
+    fi
+    if has_docker_compose_database_config; then
+        run_docker_compose_reset
+        echo "Database reset completed."
+        exit 0
+    fi
+    echo "DATABASE_URL is not set and Docker Compose database settings were not found in: $ENV_FILE" >&2
     exit 1
 fi
 
