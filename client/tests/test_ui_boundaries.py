@@ -1420,20 +1420,57 @@ def test_call_window_marks_connected_on_transport_connection() -> None:
     assert 'self.set_status_text("Connecting...")' not in connected_block
 
 
-def test_call_window_uses_fluent_dialog_shell() -> None:
+def test_call_dialogs_use_separate_fluent_dialog_shells() -> None:
     call_window = Path('client/ui/windows/call_window.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 
     assert 'from client.ui.widgets.fluent_dialog import FluentDialog' in call_window
-    assert 'class CallWindow(FluentDialog):' in call_window
+    assert 'class VoiceCallDialog(FluentDialog):' in call_window
+    assert 'class VideoCallDialog(FluentDialog):' in call_window
+    assert 'class CallWindow(' not in call_window
     assert 'FluentWidget,' not in call_window
     assert ', FluentWidget' not in call_window
-    assert 'class CallWindow(FluentWidget):' not in call_window
-    assert 'self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)' in call_window
-    assert 'root = self.content_layout' in call_window
-    assert 'self.surface.setObjectName("callWindowSurface")' in call_window
-    assert 'self.content_widget.setObjectName("callWindowContent")' in call_window
+    assert 'class VoiceCallDialog(FluentWidget):' not in call_window
+    assert 'class VideoCallDialog(FluentWidget):' not in call_window
+    assert 'dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)' in call_window
+    assert 'root = dialog.content_layout' in call_window
+    assert 'dialog.surface.setObjectName("callDialogSurface")' in call_window
+    assert 'dialog.content_widget.setObjectName("callDialogContent")' in call_window
+    assert 'def create_call_dialog(' in call_window
+    assert 'create_call_dialog(' in chat_interface
+    assert 'CallWindow' not in chat_interface
     assert 'setMicaEffectEnabled' not in call_window
     assert 'setCustomBackgroundColor' not in call_window
+
+
+def test_voice_call_dialog_has_no_video_controls() -> None:
+    call_window = Path('client/ui/windows/call_window.py').read_text(encoding='utf-8')
+    voice_block = call_window.split('class VoiceCallDialog(FluentDialog):', 1)[1].split(
+        'class VideoCallDialog(FluentDialog):',
+        1,
+    )[0]
+    video_block = call_window.split('class VideoCallDialog(FluentDialog):', 1)[1].split(
+        'CallDialogType =',
+        1,
+    )[0]
+
+    assert 'camera_control' not in voice_block
+    assert 'remote_video_label' not in voice_block
+    assert 'local_preview' not in voice_block
+    assert 'camera_control' in video_block
+    assert 'remote_video_label' in video_block
+    assert 'local_preview' in video_block
+
+
+def test_call_dialog_style_is_opaque() -> None:
+    call_window = Path('client/ui/windows/call_window.py').read_text(encoding='utf-8')
+    style_block = call_window.split('_CALL_DIALOG_STYLE =', 1)[1].split(
+        'def _apply_call_dialog_style',
+        1,
+    )[0]
+
+    assert 'rgba(' not in style_block
+    assert 'animate_on_show=False' in call_window
 
 
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
@@ -1543,14 +1580,14 @@ def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() ->
     assert 'def _end_local_call_ui(self, call_id: str) -> None:' in chat_interface
     assert 'self._end_local_call_ui(active_call.call_id)' in chat_interface
     assert 'window.hangup_requested.connect(lambda call_id, ref=window: self._on_call_window_hangup_requested(call_id, ref))' in chat_interface
-    assert 'def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:' in chat_interface
+    assert 'def _on_call_window_hangup_requested(self, call_id: str, source_window: CallDialogType) -> None:' in chat_interface
     hangup_block = chat_interface.split('def _on_call_window_hangup_requested', 1)[1].split(
         'def _on_call_window_signal_generated',
         1,
     )[0]
     assert 'self._end_local_call_ui(call_id)' in hangup_block
     assert hangup_block.index('self._end_local_call_ui(call_id)') < hangup_block.index('self._chat_controller.hangup_call(call_id)')
-    assert 'def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:' in chat_interface
+    assert 'def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallDialogType) -> None:' in chat_interface
     assert chat_interface.count('if self._call_window is not source_window:') == 2
     assert 'if self._message_context_menu is not menu:' in chat_interface
 

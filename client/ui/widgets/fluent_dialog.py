@@ -173,9 +173,11 @@ class FluentDialog(QDialog):
         *,
         title: str = "",
         radius: int = 12,
+        animate_on_show: bool = True,
     ) -> None:
         super().__init__(parent)
         self._radius = max(6, int(radius or 12))
+        self._animate_on_show = bool(animate_on_show)
         self._drag_active = False
         self._drag_offset = QPoint()
         self._show_animation_group: QParallelAnimationGroup | None = None
@@ -434,7 +436,10 @@ class FluentDialog(QDialog):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._sync_title_bar_layout()
-        self._start_show_animation()
+        if self._animate_on_show:
+            self._start_show_animation()
+        else:
+            self.setWindowOpacity(1.0)
 
     @staticmethod
     def _visible_button_width(buttons: list[QWidget]) -> int:

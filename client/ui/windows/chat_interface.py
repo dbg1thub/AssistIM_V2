@@ -73,7 +73,7 @@ from client.ui.controllers.contact_controller import get_contact_controller
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
 from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
-from client.ui.windows.call_window import CallWindow
+from client.ui.windows.call_window import CallDialogType, create_call_dialog
 from client.ui.windows.contact_interface import AddFriendDialog
 from client.ui.windows.group_creation_dialogs import StartGroupChatDialog
 from client.ui.widgets.chat_panel import ChatPanel
@@ -624,7 +624,7 @@ class ChatInterface(QWidget):
         self._dialog_refs: set[QWidget] = set()
         self._chat_search_dialog: ChatSessionSearchDialog | None = None
         self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
-        self._call_window: CallWindow | None = None
+        self._call_window: CallDialogType | None = None
         self._call_result_messages_sent: OrderedDict[str, float] = OrderedDict()
         self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
@@ -4247,7 +4247,7 @@ class ChatInterface(QWidget):
         *,
         start_media: bool = False,
         reveal: bool = True,
-    ) -> CallWindow | None:
+    ) -> CallDialogType | None:
         """Create or reuse the active media window for one accepted call."""
         if self._call_window is not None and self._call_window.call_id == call.call_id:
             self._call_window.sync_call_state(call)
@@ -4273,7 +4273,7 @@ class ChatInterface(QWidget):
             or "Me"
         )
 
-        window = CallWindow(
+        window = create_call_dialog(
             call,
             session_title=session_name,
             peer_label=peer_label,
@@ -4322,12 +4322,12 @@ class ChatInterface(QWidget):
         self._close_call_window(call_id)
         self._stop_call_ring_sounds()
 
-    def _on_call_window_destroyed(self, window: CallWindow) -> None:
+    def _on_call_window_destroyed(self, window: CallDialogType) -> None:
         """Clear the active call window reference once the widget is gone."""
         if self._call_window is window:
             self._call_window = None
 
-    def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:
+    def _on_call_window_hangup_requested(self, call_id: str, source_window: CallDialogType) -> None:
         """Relay user-triggered window close actions into websocket hangup."""
         if self._call_window is not source_window:
             return
@@ -4339,7 +4339,7 @@ class ChatInterface(QWidget):
             f"hangup call window {call_id}",
         )
 
-    def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:
+    def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallDialogType) -> None:
         """Forward JS-generated SDP and ICE payloads through the chat controller."""
         if self._call_window is not source_window:
             return
