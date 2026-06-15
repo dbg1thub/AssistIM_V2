@@ -14,6 +14,7 @@ from app.media.storage import LocalMediaStorage
 
 
 _GENERATED_AVATAR_SUBDIR = "generated_avatars"
+_AVATAR_RENDER_VERSION = "cjk-v2"
 
 
 def build_generated_user_avatar(
@@ -30,7 +31,7 @@ def build_generated_user_avatar(
         return ""
 
     initial = _avatar_initial(nickname, username=username)
-    seed = f"{normalized_user_id}|{str(username or '').strip()}|{initial}|{str(nickname or '').strip()}"
+    seed = f"{_AVATAR_RENDER_VERSION}|{normalized_user_id}|{str(username or '').strip()}|{initial}|{str(nickname or '').strip()}"
     background = _background_color(seed)
     foreground = _foreground_color(background)
     output_size = max(64, int(size or 192))
@@ -42,10 +43,12 @@ def build_generated_user_avatar(
 
     image = Image.new("RGBA", (output_size, output_size), background)
     draw = ImageDraw.Draw(image)
-    font = _avatar_font(output_size)
+    font = _avatar_font(output_size, initial)
     try:
         bbox = draw.textbbox((0, 0), initial, font=font)
-    except UnicodeEncodeError:
+    except UnicodeEncodeError as exc:
+        if _requires_cjk_font(initial):
+            raise RuntimeError("CJK avatar font cannot render generated avatar initial") from exc
         initial = "?"
         bbox = draw.textbbox((0, 0), initial, font=font)
     text_width = bbox[2] - bbox[0]
@@ -101,26 +104,69 @@ def _foreground_color(background: tuple[int, int, int, int]) -> tuple[int, int, 
     return (max(0, red - 72), max(0, green - 72), max(0, blue - 72), 255)
 
 
-def _avatar_font(size: int) -> ImageFont.ImageFont:
+def _avatar_font(size: int, initial: object = "") -> ImageFont.ImageFont:
     font_size = max(24, int(size * 0.46))
-    for font_path in _candidate_font_paths():
+    needs_cjk = _requires_cjk_font(initial)
+    for font_path in _candidate_font_paths(initial):
         try:
             if font_path.is_file():
                 return ImageFont.truetype(str(font_path), font_size)
         except Exception:
             continue
+    if needs_cjk:
+        raise RuntimeError("CJK avatar font not found; install fonts-noto-cjk in the server runtime")
     return ImageFont.load_default()
 
 
-def _candidate_font_paths() -> tuple[Path, ...]:
+def _requires_cjk_font(value: object) -> bool:
+    return any(_is_cjk_char(char) for char in str(value or ""))
+
+
+def _is_cjk_char(char: str) -> bool:
+    if not char:
+        return False
+    codepoint = ord(char)
+    return (
+        0x1100 <= codepoint <= 0x11FF
+        or 0x2E80 <= codepoint <= 0x2EFF
+        or 0x2F00 <= codepoint <= 0x2FDF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0x3130 <= codepoint <= 0x318F
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xAC00 <= codepoint <= 0xD7AF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+
+def _candidate_cjk_font_paths() -> tuple[Path, ...]:
     return (
         Path("C:/Windows/Fonts/msyhbd.ttc"),
         Path("C:/Windows/Fonts/msyh.ttc"),
         Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"),
+        Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+    )
+
+
+def _candidate_latin_font_paths() -> tuple[Path, ...]:
+    return (
         Path("C:/Windows/Fonts/arialbd.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    )
+
+
+def _candidate_font_paths(initial: object = "") -> tuple[Path, ...]:
+    if _requires_cjk_font(initial):
+        return _candidate_cjk_font_paths()
+    return (
+        *_candidate_latin_font_paths(),
+        *_candidate_cjk_font_paths(),
     )

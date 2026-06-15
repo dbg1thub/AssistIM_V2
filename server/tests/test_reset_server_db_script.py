@@ -8,6 +8,7 @@ import pytest
 
 from app.core.database import SessionLocal
 from app.core.security import verify_password
+from app.models.user import User
 from app.repositories.user_repo import UserRepository
 
 
@@ -42,6 +43,40 @@ def test_seed_test_users_fails_when_database_is_not_fresh() -> None:
     with SessionLocal() as db:
         with pytest.raises(RuntimeError, match="already exists"):
             seed_test_users(db)
+
+
+def test_regenerate_generated_avatars_rewrites_existing_generated_avatar_url() -> None:
+    from app.ops.regenerate_generated_avatars import regenerate_generated_user_avatars
+
+    old_avatar = "/uploads/generated_avatars/user-1_legacy.png"
+    with SessionLocal() as db:
+        user = User(
+            username="regen-avatar",
+            password_hash="hash",
+            nickname="邓斌",
+            avatar_kind="generated",
+            avatar=old_avatar,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        user_id = str(user.id)
+
+        result = regenerate_generated_user_avatars(db)
+        db.refresh(user)
+
+        assert result == [
+            {
+                "id": user_id,
+                "username": "regen-avatar",
+                "nickname": "邓斌",
+                "old_avatar": old_avatar,
+                "new_avatar": user.avatar,
+            }
+        ]
+        assert user.avatar_kind == "generated"
+        assert str(user.avatar or "").startswith("/uploads/generated_avatars/")
+        assert user.avatar != old_avatar
 
 
 def test_reset_server_db_script_is_ubuntu_bash_with_explicit_confirmation() -> None:

@@ -795,19 +795,102 @@ def test_generated_user_avatar_initial_is_visually_centered() -> None:
     assert abs(((min_y + max_y) / 2) - (image.height / 2)) <= 1.0
 
 
+def test_generated_user_avatar_cjk_initial_has_readable_glyph_area() -> None:
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from app.media.generated_avatars import build_generated_user_avatar
+
+    upload_dir = Path("server/.testdata/generated-avatar-cjk")
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    settings = SimpleNamespace(upload_dir=str(upload_dir), media_public_base_url="/uploads")
+    for user_id, nickname in (("cjk-user", "邓斌"), ("hangul-user", "장우진")):
+        avatar_url = build_generated_user_avatar(settings, user_id=user_id, username=user_id, nickname=nickname, size=192)
+        avatar_path = upload_dir / avatar_url.removeprefix("/uploads/")
+        image = Image.open(avatar_path).convert("RGBA")
+        background = image.getpixel((0, 0))
+        points = [
+            (x, y)
+            for y in range(image.height)
+            for x in range(image.width)
+            if image.getpixel((x, y)) != background
+        ]
+
+        assert points
+        glyph_width = max(x for x, _y in points) - min(x for x, _y in points) + 1
+        glyph_height = max(y for _x, y in points) - min(y for _x, y in points) + 1
+        assert glyph_width >= image.width * 0.2
+        assert glyph_height >= image.height * 0.2
+
+
+def test_generated_user_avatar_cjk_font_selection_does_not_use_latin_font(monkeypatch) -> None:
+    from app.media import generated_avatars as generated_avatars_module
+
+    cjk_font = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
+    latin_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    loaded_paths: list[Path] = []
+
+    monkeypatch.setattr(generated_avatars_module, "_candidate_cjk_font_paths", lambda: (cjk_font,))
+    monkeypatch.setattr(generated_avatars_module, "_candidate_latin_font_paths", lambda: (latin_font,))
+    monkeypatch.setattr(Path, "is_file", lambda self: self in {cjk_font, latin_font})
+
+    def fake_truetype(path: str, font_size: int):
+        del font_size
+        loaded_paths.append(Path(path))
+        return object()
+
+    monkeypatch.setattr(generated_avatars_module.ImageFont, "truetype", fake_truetype)
+
+    assert generated_avatars_module._avatar_font(192, "邓") is not None
+    assert loaded_paths == [cjk_font]
+
+
+def test_generated_user_avatar_cjk_font_missing_fails_before_tiny_placeholder(monkeypatch) -> None:
+    from app.media import generated_avatars as generated_avatars_module
+
+    latin_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+
+    monkeypatch.setattr(generated_avatars_module, "_candidate_cjk_font_paths", lambda: ())
+    monkeypatch.setattr(generated_avatars_module, "_candidate_latin_font_paths", lambda: (latin_font,))
+    monkeypatch.setattr(Path, "is_file", lambda self: self == latin_font)
+
+    with pytest.raises(RuntimeError, match="CJK avatar font"):
+        generated_avatars_module._avatar_font(192, "邓")
+
+
 def test_generated_user_avatar_initial_uses_bold_font_and_stroke() -> None:
     source = Path("server/app/media/generated_avatars.py").read_text(encoding="utf-8")
-    candidate_block = source.split("def _candidate_font_paths", 1)[1]
+    cjk_candidate_block = source.split("def _candidate_cjk_font_paths", 1)[1].split(
+        "def _candidate_latin_font_paths",
+        1,
+    )[0]
+    latin_candidate_block = source.split("def _candidate_latin_font_paths", 1)[1].split(
+        "def _candidate_font_paths",
+        1,
+    )[0]
     draw_block = source.split("draw.text(", 1)[1].split("temporary_path", 1)[0]
 
-    assert 'Path("C:/Windows/Fonts/msyhbd.ttc")' in candidate_block
-    assert 'Path("C:/Windows/Fonts/arialbd.ttf")' in candidate_block
-    assert 'Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")' in candidate_block
-    assert 'Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")' in candidate_block
-    assert candidate_block.index("msyhbd.ttc") < candidate_block.index("msyh.ttc")
-    assert candidate_block.index("arialbd.ttf") < candidate_block.index("arial.ttf")
+    assert 'Path("C:/Windows/Fonts/msyhbd.ttc")' in cjk_candidate_block
+    assert 'Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")' in cjk_candidate_block
+    assert 'Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc")' in cjk_candidate_block
+    assert 'Path("C:/Windows/Fonts/arialbd.ttf")' in latin_candidate_block
+    assert 'Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")' in latin_candidate_block
+    assert cjk_candidate_block.index("msyhbd.ttc") < cjk_candidate_block.index("msyh.ttc")
+    assert latin_candidate_block.index("arialbd.ttf") < latin_candidate_block.index("arial.ttf")
     assert "stroke_width=max(1, output_size // 96)" in draw_block
     assert "stroke_fill=foreground" in draw_block
+
+
+def test_server_docker_image_installs_cjk_fonts() -> None:
+    dockerfile = Path("server/Dockerfile").read_text(encoding="utf-8")
+
+    assert "fonts-noto-cjk" in dockerfile
+    assert "apt-get install" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
 
 
 
