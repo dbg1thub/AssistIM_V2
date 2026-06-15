@@ -27,6 +27,8 @@ class EmptySkillInput(_SkillInputModel):
 
 
 class MomentListSkillInput(_SkillInputModel):
+    scope: Literal["all", "feed", "mine", "liked", "received_likes"] = "all"
+    content_filter: Literal["all", "media", "links"] = "all"
     page: int = Field(default=1, ge=1)
     size: int = Field(default=20, ge=1, le=50)
 
@@ -66,6 +68,18 @@ class ViewMomentSkillInput(_SkillInputModel):
     moment_id: str = Field(min_length=1)
 
 
+class CountMomentsSkillInput(_SkillInputModel):
+    scope: Literal["all", "feed", "mine", "liked", "received_likes"] = "all"
+    content_filter: Literal["all", "media", "links"] = "all"
+
+
+class SummarizeMomentsSkillInput(_SkillInputModel):
+    scope: Literal["all", "feed", "mine", "liked", "received_likes"] = "all"
+    content_filter: Literal["all", "media", "links"] = "all"
+    question: str = Field(min_length=1)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
 class SendMessageSkillInput(_SkillInputModel):
     target: str = Field(min_length=1)
     content: str = Field(min_length=1, max_length=500)
@@ -81,6 +95,14 @@ class FriendRequestDecisionSkillInput(_SkillInputModel):
 
 
 class MemoryQASkillInput(_SkillInputModel):
+    participants: list[str] = Field(default_factory=list, max_length=5)
+    question: str = Field(min_length=1)
+    time_scope: dict[str, Any] = Field(default_factory=lambda: {"type": "all_history"})
+    keywords: list[str] = Field(default_factory=list)
+    limit: int = Field(default=8, ge=1, le=50)
+
+
+class FileContentQASkillInput(_SkillInputModel):
     participants: list[str] = Field(default_factory=list, max_length=5)
     question: str = Field(min_length=1)
     time_scope: dict[str, Any] = Field(default_factory=lambda: {"type": "all_history"})
@@ -251,6 +273,26 @@ def create_default_skill_registry(*, compiler: Any) -> AISkillRegistry:
     )
     registry.register(
         SkillSpec(
+            id="COUNT_MOMENTS",
+            description="统计当前账号可见、自己发布、点赞或互动范围内的朋友圈数量。",
+            input_model=CountMomentsSkillInput,
+            risk_level="low",
+            requires_confirmation=False,
+            compiler=compiler.compile_count_moments,
+        )
+    )
+    registry.register(
+        SkillSpec(
+            id="SUMMARIZE_MOMENTS",
+            description="读取朋友圈列表并总结朋友圈内容主题。",
+            input_model=SummarizeMomentsSkillInput,
+            risk_level="low",
+            requires_confirmation=False,
+            compiler=compiler.compile_summarize_moments,
+        )
+    )
+    registry.register(
+        SkillSpec(
             id="SEND_MESSAGE",
             description="向联系人发送一条文本消息。",
             input_model=SendMessageSkillInput,
@@ -297,6 +339,16 @@ def create_default_skill_registry(*, compiler: Any) -> AISkillRegistry:
             risk_level="low",
             requires_confirmation=False,
             compiler=compiler.compile_memory_qa,
+        )
+    )
+    registry.register(
+        SkillSpec(
+            id="FILE_CONTENT_QA",
+            description="只检索并总结本地文件摘要和文件文本分块，回答已收发文件的内容问题。",
+            input_model=FileContentQASkillInput,
+            risk_level="low",
+            requires_confirmation=False,
+            compiler=compiler.compile_file_content_qa,
         )
     )
     return registry

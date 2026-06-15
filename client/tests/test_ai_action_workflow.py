@@ -55,6 +55,7 @@ class _FakeActionMemoryManager:
         participant_match: str = "any",
         time_scope=None,
         keywords=None,
+        source_types=None,
         limit: int = 8,
     ) -> dict:
         self.calls.append(
@@ -64,6 +65,7 @@ class _FakeActionMemoryManager:
                 "participant_match": participant_match,
                 "time_scope": dict(time_scope or {}),
                 "keywords": list(keywords or []),
+                "source_types": list(source_types or []),
                 "limit": limit,
             }
         )
@@ -2727,6 +2729,7 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
         "message.send",
         "moment.get",
         "moment.list",
+        "moment.summarize",
         "session.get",
         "session.list",
         "user.confirm",
@@ -3032,6 +3035,32 @@ def test_ai_action_server_read_client_maps_message_list_route() -> None:
                 "method": "GET",
                 "path": "/sessions/session-1/messages",
                 "params": {"limit": 25, "before_seq": 10},
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_server_read_client_maps_moment_list_filters() -> None:
+    async def scenario() -> None:
+        http = _FakeServerReadHTTPClient()
+        client = AIActionServerReadClient(http_client=http)
+
+        await client.execute(
+            "moment.list",
+            {
+                "scope": "mine",
+                "content_filter": "media",
+                "page": 2,
+                "size": 10,
+            },
+        )
+
+        assert http.calls == [
+            {
+                "method": "GET",
+                "path": "/moments",
+                "params": {"scope": "mine", "content_filter": "media", "page": 2, "size": 10},
             }
         ]
 
@@ -5619,6 +5648,87 @@ def test_ai_action_registry_memory_summarize_keeps_small_context_unmodified() ->
         assert output["chunk_count"] == 0
         assert output["input_result_count"] == 2
         assert output["context_chars"] > 0
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_search_passes_source_type_filter() -> None:
+    async def scenario() -> None:
+        memory_manager = _FakeActionMemoryManager(context_lines=["文件内容片段：会议纪要"])
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=memory_manager,
+            memory_summarizer=_FakeMemorySummarizer(),
+        )
+        spec = registry.get("memory.search")
+        assert spec is not None
+
+        await spec.handler(  # type: ignore[misc]
+            {
+                "question": "文件内容有什么",
+                "source_types": ["file_summary", "file_text_chunk"],
+                "keywords": ["会议纪要"],
+                "limit": 8,
+            },
+            {},
+        )
+
+        assert memory_manager.calls == [
+            {
+                "question": "文件内容有什么",
+                "participants": [],
+                "participant_match": "any",
+                "time_scope": {"type": "all_history"},
+                "keywords": ["会议纪要"],
+                "source_types": ["file_summary", "file_text_chunk"],
+                "limit": 8,
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_moment_summarize_formats_moment_items_as_evidence() -> None:
+    async def scenario() -> None:
+        memory_summarizer = _FakeMemorySummarizer("这些朋友圈主要围绕工作安排和资料分享。")
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=memory_summarizer,
+        )
+        spec = registry.get("moment.summarize")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "items": [
+                        {
+                            "id": "moment-1",
+                            "content": "上午整理项目资料",
+                            "created_at": 1781542800,
+                            "user": {"nickname": "联系人甲"},
+                        },
+                        {
+                            "id": "moment-2",
+                            "content": "下午确认会议安排",
+                            "created_at": 1781546400,
+                            "author": {"display_name": "联系人甲"},
+                        },
+                    ],
+                    "result_count": 2,
+                },
+                "question": "这些朋友圈主要讲什么",
+            },
+            {"store": None},
+        )
+
+        assert output["text"] == "这些朋友圈主要围绕工作安排和资料分享。"
+        assert output["result_count"] == 2
+        assert len(output["context_lines"]) == 2
+        assert "朋友圈" in output["context_lines"][0]
+        assert "上午整理项目资料" in output["context_lines"][0]
+        assert memory_summarizer.calls[0]["question"] == "这些朋友圈主要讲什么"
 
     asyncio.run(scenario())
 

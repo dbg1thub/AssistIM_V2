@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from client.managers.ai_skill_compiler import AISkillCompiler
-from client.managers.ai_skill_parser import AISkillParser, parse_skill_intent_json
+from client.managers.ai_skill_parser import AISkillParser, parse_obvious_skill_intent, parse_skill_intent_json
 
 
 def _parser() -> AISkillParser:
@@ -204,6 +204,9 @@ def test_skill_parser_system_prompt_contains_generated_skill_catalog() -> None:
 
     assert "LIST_SESSION_MESSAGES" in prompt
     assert "ACCEPT_FRIEND_REQUEST" in prompt
+    assert "COUNT_MOMENTS" in prompt
+    assert "SUMMARIZE_MOMENTS" in prompt
+    assert "FILE_CONTENT_QA" in prompt
     assert "session_id" in prompt
     assert "request_id" in prompt
     assert "source enum[contact|search|user_id]" in prompt
@@ -242,3 +245,69 @@ def test_skill_parser_parse_with_model_builds_strict_local_request() -> None:
     assert request.metadata["source"] == "ai_skill_parser"
     assert request.metadata["skill_schema_version"] == AISkillParser.SCHEMA_VERSION
     assert "steps" not in request.system_prompt
+
+
+def test_parse_obvious_skill_intent_extracts_contact_message_command() -> None:
+    intent = parse_obvious_skill_intent("和 联系人甲 说 会议改到下午")
+
+    assert intent is not None
+    assert intent.type == "skill"
+    assert intent.skill == "SEND_MESSAGE"
+    assert intent.slots == {"target": "联系人甲", "content": "会议改到下午"}
+
+
+def test_parse_obvious_skill_intent_clarifies_incomplete_contact_message_command() -> None:
+    intent = parse_obvious_skill_intent("发送给 联系人甲")
+
+    assert intent is not None
+    assert intent.type == "clarification"
+    assert intent.control["missing_slots"] == ["content"]
+    assert intent.control["slots"] == {"target": "联系人甲"}
+
+
+def test_parse_obvious_skill_intent_routes_moment_read_variants() -> None:
+    list_intent = parse_obvious_skill_intent("查看朋友圈")
+    count_intent = parse_obvious_skill_intent("我发过几条朋友圈")
+    summary_intent = parse_obvious_skill_intent("我发的朋友圈主要讲什么")
+
+    assert list_intent is not None
+    assert list_intent.skill == "LIST_MOMENTS"
+    assert list_intent.slots == {"scope": "all", "content_filter": "all", "page": 1, "size": 20}
+    assert count_intent is not None
+    assert count_intent.skill == "COUNT_MOMENTS"
+    assert count_intent.slots == {"scope": "mine", "content_filter": "all"}
+    assert summary_intent is not None
+    assert summary_intent.skill == "SUMMARIZE_MOMENTS"
+    assert summary_intent.slots == {
+        "scope": "mine",
+        "content_filter": "all",
+        "question": "我发的朋友圈主要讲什么",
+        "limit": 20,
+    }
+
+
+def test_parse_obvious_skill_intent_routes_file_content_query_to_file_memory() -> None:
+    intent = parse_obvious_skill_intent("我给 联系人甲 发的 资料.txt 文件内容有什么")
+
+    assert intent is not None
+    assert intent.type == "skill"
+    assert intent.skill == "FILE_CONTENT_QA"
+    assert intent.slots == {
+        "participants": ["联系人甲"],
+        "question": "我给 联系人甲 发的 资料.txt 文件内容有什么",
+        "keywords": ["资料.txt"],
+        "time_scope": {"type": "all_history"},
+        "limit": 8,
+    }
+
+
+def test_skill_parser_parse_with_model_uses_deterministic_skill_before_model() -> None:
+    task_manager = _FakeTaskManager('{"type": "unsupported", "goal": "wrong", "reason": "should not run"}')
+
+    intent = asyncio.run(_parser().parse_with_model("和 联系人甲 说 会议改到下午", task_manager=task_manager))
+
+    assert intent is not None
+    assert intent.type == "skill"
+    assert intent.skill == "SEND_MESSAGE"
+    assert intent.slots == {"target": "联系人甲", "content": "会议改到下午"}
+    assert task_manager.requests == []

@@ -64,12 +64,20 @@ class FileListInput(_StrictInputModel):
 
 class MomentListInput(_StrictInputModel):
     user_id: str | None = None
+    scope: Literal["all", "feed", "mine", "liked", "received_likes"] = "all"
+    content_filter: Literal["all", "media", "links"] = "all"
     page: int = Field(default=1, ge=1)
     size: int = Field(default=20, ge=1, le=50)
 
 
 class MomentGetInput(_StrictInputModel):
     moment_id: str = Field(min_length=1)
+
+
+class MomentSummarizeInput(_StrictInputModel):
+    source: dict[str, Any]
+    question: str = ""
+    style: str = "summary"
 
 
 class ServerReadOutput(_ActionOutputModel):
@@ -108,6 +116,15 @@ class MemorySearchInput(_StrictInputModel):
     participant_match: Literal["any", "all", "direct_only", "group_only"] = "any"
     time_scope: dict[str, Any] = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list)
+    source_types: list[
+        Literal[
+            "conversation_summary",
+            "file_summary",
+            "file_text_chunk",
+            "voice_transcript",
+            "image_summary",
+        ]
+    ] = Field(default_factory=list)
     question: str = ""
     limit: int = Field(default=8, ge=1, le=50)
     max_items: int | None = Field(default=None, ge=1, le=50)

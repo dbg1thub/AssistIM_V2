@@ -61,6 +61,7 @@ def _action_memory_search_cache_key(
     question: str,
     participants: Sequence[_ResolvedParticipant],
     participant_match: str,
+    source_types: Sequence[str],
     start_ts: int | None,
     end_ts: int | None,
     keywords: Sequence[str],
@@ -97,6 +98,13 @@ def _action_memory_search_cache_key(
         ],
         "question": " ".join(str(question or "").split()),
         "search_version": normalized_search_version,
+        "source_types": list(
+            dict.fromkeys(
+                str(source_type or "").strip()
+                for source_type in list(source_types or [])
+                if str(source_type or "").strip()
+            )
+        ),
         "terms": list(
             dict.fromkeys(
                 str(term or "").strip().casefold()
@@ -148,6 +156,22 @@ class ConversationMemoryManager:
     MESSAGE_FALLBACK_RESULT_LIMIT = 8
     ACTION_MEMORY_SEARCH_CACHE_NAMESPACE = "memory.search"
     ACTION_MEMORY_SEARCH_VERSION = "action_memory_search:v1"
+
+    @classmethod
+    def _normalize_ai_memory_source_types(cls, source_types: Sequence[str] | None) -> tuple[str, ...]:
+        if not source_types:
+            return cls.AI_MEMORY_SOURCE_TYPES
+        allowed = set(cls.AI_MEMORY_SOURCE_TYPES)
+        normalized: list[str] = []
+        for source_type in list(source_types or ()):
+            text = str(source_type or "").strip()
+            if not text:
+                continue
+            if text not in allowed:
+                raise ValueError(f"unsupported AI memory source type: {text}")
+            if text not in normalized:
+                normalized.append(text)
+        return tuple(normalized) or cls.AI_MEMORY_SOURCE_TYPES
 
     _HISTORY_INTENTS = (
         "聊了什么",
@@ -574,6 +598,7 @@ class ConversationMemoryManager:
         start_ts: int | None = None,
         end_ts: int | None = None,
         session_id: str = "",
+        source_types: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         if self._ai_memory_store is None:
             return []
@@ -582,11 +607,12 @@ class ConversationMemoryManager:
             return []
         normalized_limit = max(1, int(limit or self.RAG_CANDIDATE_LIMIT))
         search_limit = max(normalized_limit, min(500, normalized_limit * 4))
+        normalized_source_types = self._normalize_ai_memory_source_types(source_types)
         try:
             results = await self._ai_memory_store.search(
                 query_vector=query_vector.values,
                 owner_scope=owner_scope,
-                source_types=self.AI_MEMORY_SOURCE_TYPES,
+                source_types=normalized_source_types,
                 embedding_model_id=self._vector_index.model_id,
                 limit=search_limit,
                 min_score=self.AI_MEMORY_MIN_SCORE,
@@ -1241,11 +1267,13 @@ class ConversationMemoryManager:
         participant_match: str = "any",
         time_scope: dict[str, Any] | None = None,
         keywords: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
         limit: int = 8,
     ) -> dict[str, Any]:
         """Return structured memory search results for AI action workflow."""
         normalized_limit = max(1, min(20, int(limit or 8)))
         query_text = " ".join(str(question or "").split())
+        normalized_source_types = self._normalize_ai_memory_source_types(source_types)
         keyword_terms = tuple(
             str(term or "").strip().casefold()
             for term in list(keywords or [])
@@ -1274,6 +1302,7 @@ class ConversationMemoryManager:
             question=query_text,
             participants=resolved_participants,
             participant_match=normalized_participant_match,
+            source_types=normalized_source_types,
             start_ts=start_ts,
             end_ts=end_ts,
             keywords=keyword_terms,
@@ -1308,6 +1337,7 @@ class ConversationMemoryManager:
             start_ts=start_ts,
             end_ts=end_ts,
             limit=candidate_limit,
+            source_types=normalized_source_types,
         )
         relation = "together" if str(participant_match or "").strip().lower() == "all" else "separate"
         filtered = self._filter_items_for_relation(items, resolved_participants, relation)
@@ -1457,6 +1487,8 @@ class ConversationMemoryManager:
             return True
         if any(self._text_has_recall_subject_scope(text) for text in candidate_texts):
             return True
+        if self._rag_plan_has_content_query_scope(candidate_texts, plan):
+            return True
 
         previous_user_text = self._latest_previous_user_text(previous_messages)
         if not previous_user_text:
@@ -1464,6 +1496,17 @@ class ConversationMemoryManager:
         if self._text_has_explicit_ai_memory_scope(previous_user_text):
             return True
         return self._text_has_recall_subject_scope(previous_user_text)
+
+    def _rag_plan_has_content_query_scope(
+        self,
+        candidate_texts: Sequence[str],
+        plan: ConversationRagSemanticPlan,
+    ) -> bool:
+        if plan.participant_relation == "unknown":
+            return False
+        if plan.participants:
+            return False
+        return any(self._extract_rag_terms(text) for text in candidate_texts)
 
     def _text_has_explicit_ai_memory_scope(self, text: str) -> bool:
         normalized = " ".join(str(text or "").casefold().split())

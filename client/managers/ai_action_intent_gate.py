@@ -162,7 +162,9 @@ def classify_obvious_action_intent(user_text: str) -> AIActionIntentDecision | N
         return AIActionIntentDecision(is_action=True, confidence=0.98, reason="assistim_object_action")
     if any(term in text for term in ("聊过什么", "聊了什么", "之前聊过", "聊天历史", "历史消息")):
         return AIActionIntentDecision(is_action=True, confidence=0.98, reason="assistim_memory_query")
-    if re.search(r"^给.+(说|发|发送|告诉)", text):
+    if re.search(r"^(?:给|向|和|跟|对).+(?:说|发|发送|告诉|转告).+", text):
+        return AIActionIntentDecision(is_action=True, confidence=0.97, reason="assistim_send_request")
+    if re.search(r"^(?:发|发送|告诉|转告)(?:给|向).+", text):
         return AIActionIntentDecision(is_action=True, confidence=0.97, reason="assistim_send_request")
     delegated = any(term in text for term in ("帮我", "替我", "帮忙"))
     delegated_action = any(term in text for term in ("删除", "删掉", "移除", "撤回", "召回", "上传", "建群", "创建群", "拉进群"))

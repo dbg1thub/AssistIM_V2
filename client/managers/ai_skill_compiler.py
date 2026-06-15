@@ -231,12 +231,20 @@ class AISkillCompiler:
     def compile_list_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
         page = int(getattr(slots, "page", 1) or 1)
         size = int(getattr(slots, "size", 20) or 20)
+        args: dict[str, Any] = {"page": page, "size": size}
+        fields_set = set(getattr(slots, "model_fields_set", set()) or set())
+        scope = str(getattr(slots, "scope", "") or "").strip()
+        content_filter = str(getattr(slots, "content_filter", "") or "").strip()
+        if "scope" in fields_set and scope:
+            args["scope"] = scope
+        if "content_filter" in fields_set and content_filter:
+            args["content_filter"] = content_filter
         return self._single_step_plan(
             intent,
             fallback="查看朋友圈列表",
             step_id="list_moments",
             action="moment.list",
-            args={"page": page, "size": size},
+            args=args,
         )
 
     def compile_list_user_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
@@ -302,6 +310,43 @@ class AISkillCompiler:
             step_id="get_moment",
             action="moment.get",
             args={"moment_id": moment_id},
+        )
+
+    def compile_count_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        scope = str(getattr(slots, "scope", "") or "all").strip() or "all"
+        content_filter = str(getattr(slots, "content_filter", "") or "all").strip() or "all"
+        return self._single_step_plan(
+            intent,
+            fallback="统计朋友圈数量",
+            step_id="count_moments",
+            action="moment.list",
+            args={"scope": scope, "content_filter": content_filter, "page": 1, "size": 1},
+        )
+
+    def compile_summarize_moments(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        scope = str(getattr(slots, "scope", "") or "all").strip() or "all"
+        content_filter = str(getattr(slots, "content_filter", "") or "all").strip() or "all"
+        question = str(getattr(slots, "question", "") or "").strip()
+        limit = int(getattr(slots, "limit", 20) or 20)
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, question or "总结朋友圈内容"),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="list_moments",
+                    action="moment.list",
+                    args={"scope": scope, "content_filter": content_filter, "page": 1, "size": limit},
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="summarize_moments",
+                    action="moment.summarize",
+                    args={"source": "$list_moments", "question": question, "style": "summary"},
+                    depends_on=("list_moments",),
+                ),
+            ),
+            final={"source": "$summarize_moments"},
         )
 
     def compile_send_message(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
@@ -477,6 +522,70 @@ class AISkillCompiler:
                 ),
             ),
             final={"source": "$summarize_memory"},
+        )
+
+    def compile_file_content_qa(self, intent: SkillIntent, slots: BaseModel) -> AIActionPlan:
+        participants = [str(item or "").strip() for item in list(getattr(slots, "participants", []) or []) if str(item or "").strip()]
+        question = str(getattr(slots, "question", "") or "").strip()
+        time_scope = dict(getattr(slots, "time_scope", {}) or {"type": "all_history"})
+        keywords = [str(item or "").strip() for item in list(getattr(slots, "keywords", []) or []) if str(item or "").strip()]
+        limit = int(getattr(slots, "limit", 8) or 8)
+        memory_args = {
+            "participants": "$resolve_participants.contacts" if participants else [],
+            "participant_match": "any",
+            "time_scope": time_scope,
+            "keywords": keywords,
+            "source_types": ["file_summary", "file_text_chunk"],
+            "question": question,
+            "limit": limit,
+            "return_raw_content": False,
+        }
+        if not participants:
+            return AIActionPlan(
+                is_action=True,
+                goal=_goal(intent, question or "查询文件内容"),
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_files",
+                        action="memory.search",
+                        args=memory_args,
+                        depends_on=(),
+                    ),
+                    AIActionStep(
+                        id="summarize_files",
+                        action="memory.summarize",
+                        args={"source": "$search_files", "question": question, "style": "summary"},
+                        depends_on=("search_files",),
+                    ),
+                ),
+                final={"source": "$summarize_files"},
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=_goal(intent, question or "查询文件内容"),
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="resolve_participants",
+                    action="contact.resolve",
+                    args={"queries": participants, "allow_multiple": True},
+                    depends_on=(),
+                ),
+                AIActionStep(
+                    id="search_files",
+                    action="memory.search",
+                    args=memory_args,
+                    depends_on=("resolve_participants",),
+                ),
+                AIActionStep(
+                    id="summarize_files",
+                    action="memory.summarize",
+                    args={"source": "$search_files", "question": question, "style": "summary"},
+                    depends_on=("search_files",),
+                ),
+            ),
+            final={"source": "$summarize_files"},
         )
 
     def _single_step_plan(

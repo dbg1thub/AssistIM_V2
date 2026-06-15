@@ -30,6 +30,7 @@ from client.managers.ai_action_io_models import (
     MessageSendOutput,
     MomentGetInput,
     MomentListInput,
+    MomentSummarizeInput,
     PagedReadInput,
     ServerReadOutput,
     ServerWriteOutput,
@@ -54,6 +55,13 @@ MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS = 1200
 MEMORY_SUMMARIZE_CHUNK_SIZE = 4
 MEMORY_SUMMARIZE_CHUNK_DEFAULT_ITEM_MAX_CHARS = 34
 MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS = 260
+AI_MEMORY_SOURCE_TYPES = {
+    "conversation_summary",
+    "file_summary",
+    "file_text_chunk",
+    "voice_transcript",
+    "image_summary",
+}
 MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
 MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v3"
 MEMORY_SUMMARIZE_MODEL_ID = "ai_action_memory_summarizer:v1"
@@ -88,7 +96,7 @@ SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "session.get": _ServerReadRoute("/sessions/{session_id}", path_args=("session_id",)),
     "message.list": _ServerReadRoute("/sessions/{session_id}/messages", path_args=("session_id",), param_args=("limit", "before_seq")),
     "file.list": _ServerReadRoute("/files", param_args=("limit",)),
-    "moment.list": _ServerReadRoute("/moments", param_args=("user_id", "page", "size")),
+    "moment.list": _ServerReadRoute("/moments", param_args=("user_id", "scope", "content_filter", "page", "size")),
     "moment.get": _ServerReadRoute("/moments/{moment_id}", path_args=("moment_id",)),
 }
 
@@ -580,6 +588,30 @@ class AtomicActionRegistry:
         )
         self._register(
             AtomicActionSpec(
+                name="moment.summarize",
+                kind="read",
+                risk_level="low",
+                handler=self._moment_summarize,
+                input_model=MomentSummarizeInput,
+                output_model=MemorySummarizeOutput,
+                allow_all_history=False,
+                allow_cross_session=False,
+                max_input_bytes=32768,
+                max_output_json_bytes=32768,
+                model_call_cost=1,
+                estimated_input_tokens=2048,
+                estimated_output_tokens=512,
+                timeout_ms=MEMORY_SUMMARIZE_TIMEOUT_MS,
+                prompt_purpose="把 moment.list 的朋友圈列表压缩为面向用户问题的内容总结。",
+                planner_required_predecessors=("moment.list",),
+                prompt_notes=(
+                    "source 必须引用 moment.list 输出，不直接引用用户自然语言。",
+                    "用于回答朋友圈内容主题、主要讲什么等问题；统计数量直接使用 moment.list，不使用该 action。",
+                ),
+            )
+        )
+        self._register(
+            AtomicActionSpec(
                 name="memory.search",
                 kind="read",
                 risk_level="low",
@@ -828,9 +860,22 @@ class AtomicActionRegistry:
             participant_match=payload.participant_match,
             time_scope=payload.time_scope,
             keywords=payload.keywords,
+            source_types=payload.source_types,
             limit=payload.limit,
         )
         return _normalize_memory_search_output(raw_output, question=payload.question)
+
+    async def _moment_summarize(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        payload = MomentSummarizeInput.model_validate(dict(args or {}))
+        source = _moment_summarize_source(dict(payload.source or {}))
+        return await self._memory_summarize(
+            {
+                "source": source,
+                "question": payload.question,
+                "style": payload.style,
+            },
+            context,
+        )
 
     async def _memory_summarize(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         payload = await _MemorySummarizeInput.from_args(args, store=context.get("store"))
@@ -1144,6 +1189,7 @@ class _MemorySearchInput:
     participant_match: str
     time_scope: dict[str, Any]
     keywords: list[str]
+    source_types: list[str]
     limit: int
 
     @classmethod
@@ -1169,6 +1215,7 @@ class _MemorySearchInput:
             participant_match=participant_match,
             time_scope=normalized_time_scope,
             keywords=keywords,
+            source_types=_clean_memory_source_types(args.get("source_types")),
             limit=limit,
         )
 
@@ -1246,6 +1293,65 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         if str(output.get("cache_search_version") or "").strip():
             normalized["cache_search_version"] = str(output.get("cache_search_version") or "").strip()
     return normalized
+
+
+def _moment_summarize_source(source: dict[str, Any]) -> dict[str, Any]:
+    items = [dict(item) for item in list(source.get("items") or []) if isinstance(item, dict)]
+    context_lines: list[str] = []
+    results: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        line = _moment_context_line(item)
+        if not line:
+            continue
+        context_lines.append(line)
+        results.append(
+            {
+                "source_id": str(item.get("id") or item.get("moment_id") or index).strip(),
+                "source_type": "moment",
+                "title": _moment_author_name(item),
+                "text": line,
+                "text_preview": line,
+            }
+        )
+    try:
+        result_count = max(0, int(source.get("result_count") or source.get("total") or len(items) or len(context_lines)))
+    except (TypeError, ValueError):
+        result_count = len(items) or len(context_lines)
+    return {
+        "context_lines": context_lines,
+        "results": results,
+        "result_count": result_count,
+        "truncated": bool(source.get("truncated")),
+    }
+
+
+def _moment_context_line(item: dict[str, Any]) -> str:
+    author = _moment_author_name(item)
+    created_at = str(item.get("created_at") or item.get("timestamp") or "").strip()
+    content = str(item.get("content") or item.get("text") or item.get("caption") or "").strip()
+    media = list(item.get("media") or []) if isinstance(item.get("media"), list) else []
+    parts = ["朋友圈"]
+    if created_at:
+        parts.append(f"时间：{created_at}")
+    if author:
+        parts.append(f"作者：{author}")
+    if content:
+        parts.append(f"内容：{_clip_text(content, 260)}")
+    if media:
+        parts.append(f"媒体数量：{len(media)}")
+    return "；".join(parts)
+
+
+def _moment_author_name(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in ("user", "author", "sender"):
+        nested = item.get(key)
+        if isinstance(nested, dict):
+            name = _display_name_for_payload(nested)
+            if name:
+                return name
+    return _display_name_for_payload(item)
 
 
 def _normalize_server_read_output(action_name: str, payload: Any) -> dict[str, Any]:
@@ -1577,8 +1683,6 @@ def _is_common_server_read_note(note: str) -> bool:
 def _include_prompt_purpose(spec: AtomicActionSpec) -> bool:
     return spec.name in {
         "contact.resolve",
-        "memory.search",
-        "memory.summarize",
         "user.search",
         "message.draft",
         "user.confirm",
@@ -1595,8 +1699,9 @@ def _include_output_fields(spec: AtomicActionSpec) -> bool:
 
 def _output_prompt_fields(spec: AtomicActionSpec) -> str:
     fields_by_action = {
-        "memory.search": "results, context_lines, result_count!",
-        "memory.summarize": "result_count!, status!, text",
+        "memory.search": "results,context,result_count!",
+        "memory.summarize": "text!,result_count!",
+        "moment.summarize": "text!,result_count!",
         "message.send": "status!, text!",
     }
     if spec.name in fields_by_action:
@@ -1607,6 +1712,8 @@ def _output_prompt_fields(spec: AtomicActionSpec) -> str:
 def _input_prompt_fields(spec: AtomicActionSpec) -> str:
     fields_by_action = {
         "contact.resolve": "queries:list!, allow_multiple:bool",
+        "memory.search": "participants, participant_match, time_scope, keywords, source_types, question, limit",
+        "moment.summarize": "source!, question, style",
         "user.confirm": "risk:low/medium/high, preview:dict!",
     }
     if spec.name in fields_by_action:
@@ -1996,6 +2103,14 @@ def _clean_list(value: object) -> list[str]:
         if text not in items:
             items.append(text)
     return items[:8]
+
+
+def _clean_memory_source_types(value: object) -> list[str]:
+    source_types = _clean_list(value)
+    invalid = [item for item in source_types if item not in AI_MEMORY_SOURCE_TYPES]
+    if invalid:
+        raise ActionHandlerError(f"INVALID_MEMORY_SOURCE_TYPE: {invalid[0]}")
+    return source_types
 
 
 def _candidate_to_dict(candidate: Any, *, raw: str) -> dict[str, Any]:

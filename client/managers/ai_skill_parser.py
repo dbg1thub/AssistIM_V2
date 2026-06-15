@@ -41,6 +41,9 @@ class AISkillParser:
         max_tokens: int = 512,
         strict: bool = True,
     ) -> SkillIntent | None:
+        deterministic = parse_obvious_skill_intent(user_text)
+        if deterministic is not None:
+            return deterministic
         request = self.build_request(user_text, max_tokens=max_tokens, strict=strict)
         snapshot = await task_manager.run_once(request)
         return self.parse(str(getattr(snapshot, "content", "") or ""))
@@ -103,6 +106,21 @@ class AISkillParser:
     @staticmethod
     def user_prompt(user_text: str) -> str:
         return f"用户输入：{str(user_text or '').strip()}"
+
+
+def parse_obvious_skill_intent(user_text: str) -> SkillIntent | None:
+    text = _normalize_user_text(user_text)
+    if not text:
+        return None
+    for parser in (
+        _parse_file_content_skill,
+        _parse_moment_skill,
+        _parse_send_message_skill,
+    ):
+        intent = parser(text)
+        if intent is not None:
+            return intent
+    return None
 
 
 def parse_skill_intent_json(raw_output: str, *, registry: AISkillRegistry | None = None) -> SkillIntent | None:
@@ -177,6 +195,156 @@ def _parse_clarification_payload(payload: dict[str, Any]) -> SkillIntent | None:
         reason=str(payload.get("reason") or "").strip(),
         control={"missing_slots": missing_slots, "question": question},
     )
+
+
+def _parse_send_message_skill(text: str) -> SkillIntent | None:
+    normalized = _strip_request_prefix(text)
+    patterns = (
+        re.compile(r"^(?:给|向|和|跟|对)\s*(?P<target>.+?)\s*(?:发送|告诉|转告|说|发)\s*(?P<content>.*)$"),
+        re.compile(r"^(?:发送|发|告诉|转告)\s*(?:给|向)\s*(?P<target>.+?)(?:\s+(?P<content>.+))?$"),
+    )
+    for pattern in patterns:
+        match = pattern.match(normalized)
+        if not match:
+            continue
+        target = _clean_slot_text(match.group("target"))
+        content = _clean_slot_text(match.groupdict().get("content") or "")
+        if not target:
+            return None
+        if content:
+            return SkillIntent(
+                type="skill",
+                skill="SEND_MESSAGE",
+                goal=f"给 {target} 发送消息",
+                slots={"target": target, "content": content},
+                confidence="high",
+                reason="deterministic_send_message_syntax",
+            )
+        return SkillIntent(
+            type="clarification",
+            skill="SEND_MESSAGE",
+            goal=f"给 {target} 发送消息",
+            slots={"target": target},
+            confidence="high",
+            reason="missing_message_content",
+            control={
+                "missing_slots": ["content"],
+                "question": "你想发送什么内容？",
+                "slots": {"target": target},
+            },
+        )
+    return None
+
+
+def _parse_moment_skill(text: str) -> SkillIntent | None:
+    if "朋友圈" not in text:
+        return None
+    normalized = _strip_request_prefix(text)
+    scope = _moment_scope(normalized)
+    content_filter = _moment_content_filter(normalized)
+    if any(term in normalized for term in ("几条", "多少条", "多少个", "多少", "数量", "数目")):
+        return SkillIntent(
+            type="skill",
+            skill="COUNT_MOMENTS",
+            goal="统计朋友圈数量",
+            slots={"scope": scope, "content_filter": content_filter},
+            confidence="high",
+            reason="deterministic_moment_count",
+        )
+    if any(term in normalized for term in ("主要", "主题", "讲什么", "说什么", "内容", "总结", "概括")):
+        return SkillIntent(
+            type="skill",
+            skill="SUMMARIZE_MOMENTS",
+            goal="总结朋友圈内容",
+            slots={
+                "scope": scope,
+                "content_filter": content_filter,
+                "question": normalized,
+                "limit": 20,
+            },
+            confidence="high",
+            reason="deterministic_moment_summary",
+        )
+    if any(term in normalized for term in ("查看", "看看", "看下", "看一下", "浏览", "列表")):
+        return SkillIntent(
+            type="skill",
+            skill="LIST_MOMENTS",
+            goal="查看朋友圈列表",
+            slots={"scope": scope, "content_filter": content_filter, "page": 1, "size": 20},
+            confidence="high",
+            reason="deterministic_moment_list",
+        )
+    return None
+
+
+def _parse_file_content_skill(text: str) -> SkillIntent | None:
+    if "文件" not in text:
+        return None
+    if not any(term in text for term in ("内容", "摘要", "总结", "讲什么", "说什么", "有什么", "是什么")):
+        return None
+    participants: list[str] = []
+    target_match = re.search(r"(?:给|向)\s*(?P<target>.+?)\s*(?:发送|发|传|上传)(?:的)?", text)
+    if target_match:
+        target = _clean_slot_text(target_match.group("target"))
+        if target:
+            participants.append(target)
+    keywords = _file_query_keywords(text)
+    return SkillIntent(
+        type="skill",
+        skill="FILE_CONTENT_QA",
+        goal="检索文件内容",
+        slots={
+            "participants": participants[:5],
+            "question": text,
+            "keywords": keywords,
+            "time_scope": {"type": "all_history"},
+            "limit": 8,
+        },
+        confidence="high",
+        reason="deterministic_file_content_query",
+    )
+
+
+def _moment_scope(text: str) -> str:
+    if any(term in text for term in ("我发", "我发布", "我发过", "我发的", "我的朋友圈")):
+        return "mine"
+    if any(term in text for term in ("点赞", "赞过", "我赞")):
+        return "liked"
+    return "all"
+
+
+def _moment_content_filter(text: str) -> str:
+    if any(term in text for term in ("图片", "照片", "视频", "媒体")):
+        return "media"
+    if "链接" in text:
+        return "links"
+    return "all"
+
+
+def _file_query_keywords(text: str) -> list[str]:
+    keywords: list[str] = []
+    quoted = re.findall(r"[「『“\"]([^」』”\"]+)[」』”\"]", text)
+    for item in quoted:
+        cleaned = _clean_slot_text(item)
+        if cleaned and cleaned not in keywords:
+            keywords.append(cleaned)
+    for match in re.finditer(r"([^\s，,。？?；;：:]+?\.[A-Za-z0-9\u4e00-\u9fff]{1,12})\s*文件", text):
+        cleaned = _clean_slot_text(match.group(1))
+        if cleaned and cleaned not in keywords:
+            keywords.append(cleaned)
+    return keywords[:5]
+
+
+def _strip_request_prefix(text: str) -> str:
+    return re.sub(r"^(?:帮我和用户|帮我给用户|请|麻烦|帮我|替我|帮忙)\s*", "", text).strip()
+
+
+def _normalize_user_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _clean_slot_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip(" ，,。？！?;；:：")
 
 
 def _slot_fields_are_known(slots: dict[str, Any], input_model: type[Any]) -> bool:

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from client.managers.ai_action_intent_gate import AIActionIntentGate, classify_obvious_action_intent, parse_action_intent_decision_json
 
 
@@ -54,6 +56,23 @@ def test_classify_obvious_action_intent_routes_product_actions_without_model() -
     assert classify_obvious_action_intent("帮我删除 dengbin 好友").is_action is True
     assert classify_obvious_action_intent("我和 dengbin 之前聊过什么？").is_action is True
     assert classify_obvious_action_intent("怎么删除 MySQL 数据库？").is_action is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "和 联系人甲 说 会议改到下午",
+        "跟 联系人甲 说会议改到下午",
+        "对 联系人甲 告诉 会议改到下午",
+        "向 联系人甲 发送 会议改到下午",
+    ],
+)
+def test_classify_obvious_action_intent_routes_contact_message_syntax_without_model(text: str) -> None:
+    decision = classify_obvious_action_intent(text)
+
+    assert decision is not None
+    assert decision.is_action is True
+    assert decision.reason == "assistim_send_request"
 
 
 def test_action_intent_gate_skips_model_for_obvious_product_action() -> None:

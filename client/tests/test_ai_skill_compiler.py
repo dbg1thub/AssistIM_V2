@@ -84,6 +84,12 @@ def test_send_message_skill_compiles_to_confirmed_message_plan() -> None:
         ("LIST_SESSIONS", {}, "session.list", {}),
         ("LIST_UPLOADED_FILES", {"limit": 30}, "file.list", {"limit": 30}),
         ("LIST_MOMENTS", {"page": 2, "size": 10}, "moment.list", {"page": 2, "size": 10}),
+        (
+            "LIST_MOMENTS",
+            {"scope": "mine", "content_filter": "media", "page": 2, "size": 10},
+            "moment.list",
+            {"scope": "mine", "content_filter": "media", "page": 2, "size": 10},
+        ),
     ],
 )
 def test_server_read_list_skills_compile_to_single_read_action(
@@ -290,6 +296,74 @@ def test_memory_qa_skill_without_participants_skips_contact_resolve() -> None:
     ]
     assert _step(result.plan, "memory.search").args["participants"] == []
     assert _step(result.plan, "memory.search").args["keywords"] == ["合同", "文件"]
+    assert _validator().validate(result.plan).allowed
+
+
+def test_count_moments_skill_reads_one_page_with_requested_scope() -> None:
+    result = _compile("COUNT_MOMENTS", {"scope": "mine", "content_filter": "all"})
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == ["moment.list"]
+    assert _step(result.plan, "moment.list").args == {
+        "scope": "mine",
+        "content_filter": "all",
+        "page": 1,
+        "size": 1,
+    }
+    assert result.plan.final == {"source": "$count_moments"}
+    assert _validator().validate(result.plan).allowed
+
+
+def test_summarize_moments_skill_reads_moments_then_summarizes_items() -> None:
+    result = _compile(
+        "SUMMARIZE_MOMENTS",
+        {"scope": "mine", "content_filter": "all", "question": "我发的朋友圈主要讲什么", "limit": 20},
+    )
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == ["moment.list", "moment.summarize"]
+    assert _step(result.plan, "moment.list").args == {
+        "scope": "mine",
+        "content_filter": "all",
+        "page": 1,
+        "size": 20,
+    }
+    assert _step(result.plan, "moment.summarize").args == {
+        "source": "$list_moments",
+        "question": "我发的朋友圈主要讲什么",
+        "style": "summary",
+    }
+    assert result.plan.final == {"source": "$summarize_moments"}
+    assert _validator().validate(result.plan).allowed
+
+
+def test_file_content_qa_skill_filters_memory_search_to_file_sources() -> None:
+    result = _compile(
+        "FILE_CONTENT_QA",
+        {
+            "participants": ["联系人甲"],
+            "question": "我给 联系人甲 发的 资料.txt 文件内容有什么",
+            "keywords": ["资料.txt"],
+            "time_scope": {"type": "all_history"},
+            "limit": 8,
+        },
+    )
+
+    assert result.type == "plan"
+    assert result.plan is not None
+    assert _actions(result.plan) == ["contact.resolve", "memory.search", "memory.summarize"]
+    assert _step(result.plan, "contact.resolve").args == {
+        "queries": ["联系人甲"],
+        "allow_multiple": True,
+    }
+    search_args = _step(result.plan, "memory.search").args
+    assert search_args["participants"] == "$resolve_participants.contacts"
+    assert search_args["keywords"] == ["资料.txt"]
+    assert search_args["source_types"] == ["file_summary", "file_text_chunk"]
+    assert search_args["return_raw_content"] is False
+    assert _step(result.plan, "memory.summarize").args["source"] == "$search_files"
     assert _validator().validate(result.plan).allowed
 
 

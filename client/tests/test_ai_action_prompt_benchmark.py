@@ -548,6 +548,7 @@ def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
     assert any("group.get" in case.expectation.required_actions for case in cases)
     assert any("moment.list" in case.expectation.required_actions for case in cases)
     assert any("moment.get" in case.expectation.required_actions for case in cases)
+    assert any("moment.summarize" in case.expectation.required_actions for case in cases)
     assert any(
         case.expectation.required_action_sequence == ("contact.resolve", "memory.search", "memory.summarize")
         for case in cases
