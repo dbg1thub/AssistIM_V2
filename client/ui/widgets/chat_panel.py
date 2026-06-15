@@ -277,6 +277,7 @@ class ChatPanel(QWidget):
         self._current_session: Optional[Session] = None
         self._message_scroll_gap = 0
         self._restoring_message_view = False
+        self._image_viewers: list[object] = []
         self._video_windows: list[VideoWidget] = []
         self._voice_player = None
         self._voice_audio_output = None
@@ -1313,11 +1314,8 @@ class ChatPanel(QWidget):
             return
 
         if message.message_type == MessageType.IMAGE:
-            from client.ui.widgets.image_viewer import ImageViewer
-
             image_source = message.extra.get("local_path") or message.content
-            viewer = ImageViewer(image_source, self)
-            viewer.exec()
+            self._show_image_viewer(image_source)
             return
 
         if message.message_type == MessageType.VIDEO:
@@ -1437,11 +1435,7 @@ class ChatPanel(QWidget):
             return False
 
         if message_type == MessageType.IMAGE:
-            from client.ui.widgets.image_viewer import ImageViewer
-
-            viewer = ImageViewer(file_path, self)
-            viewer.exec()
-            return True
+            return self._show_image_viewer(file_path)
 
         if message_type == MessageType.VIDEO:
             message = ChatMessage(
@@ -1466,6 +1460,25 @@ class ChatPanel(QWidget):
             return self.play_voice_message(message, file_path)
 
         return QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+
+    def _show_image_viewer(self, image_source: str) -> bool:
+        """Show one image viewer without entering a nested Qt event loop."""
+        if not image_source:
+            return False
+
+        from client.ui.widgets.image_viewer import ImageViewer
+
+        viewer = ImageViewer(image_source, self)
+        self._image_viewers.append(viewer)
+        viewer.destroyed.connect(lambda *_args, widget=viewer: self._discard_image_viewer(widget))
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+        return True
+
+    def _discard_image_viewer(self, widget: object) -> None:
+        """Drop a closed image viewer from the local lifetime cache."""
+        self._image_viewers = [item for item in self._image_viewers if item is not widget]
 
     def _discard_video_window(self, widget: VideoWidget) -> None:
         """Drop closed top-level video widgets from the local cache."""

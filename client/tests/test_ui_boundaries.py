@@ -2734,6 +2734,19 @@ def test_chat_file_open_flow_routes_downloads_through_controller_boundary() -> N
     assert 'def _on_media_ready(self, data: dict) -> None:' in chat_interface
 
 
+def test_chat_image_viewer_is_non_modal_to_keep_qasync_tasks_alive() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'def _show_image_viewer(self, image_source: str) -> bool:' in chat_panel
+    assert 'self._image_viewers: list[object] = []' in chat_panel
+    assert 'viewer.show()' in chat_panel
+    assert 'viewer.raise_()' in chat_panel
+    assert 'viewer.activateWindow()' in chat_panel
+    assert 'viewer.exec()' not in chat_panel
+    assert 'viewer.exec()' not in chat_interface
+
+
 def test_chat_attachment_open_failure_messages_use_preview_state() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 

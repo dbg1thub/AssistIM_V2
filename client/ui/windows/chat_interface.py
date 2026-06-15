@@ -5295,10 +5295,14 @@ class ChatInterface(QWidget):
             return
 
         if message.message_type == MessageType.IMAGE:
-            from client.ui.widgets.image_viewer import ImageViewer
-
-            viewer = ImageViewer(message.extra.get("local_path") or message.content, self)
-            viewer.exec()
+            image_source = str((message.extra or {}).get("local_path") or message.content or "").strip()
+            if not self.chat_panel.open_local_attachment(image_source, MessageType.IMAGE):
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    self._attachment_open_failure_message(message),
+                    parent=self.window(),
+                    duration=1800,
+                )
             return
 
         if message.message_type == MessageType.VIDEO:
