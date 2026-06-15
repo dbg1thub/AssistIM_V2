@@ -21,6 +21,8 @@ try:  # pragma: no cover - optional runtime dependency
     from aiortc.mediastreams import MediaStreamError
     from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
     import aioice.ice as aioice_ice
+    import aioice.stun as aioice_stun
+    import aioice.turn as aioice_turn
     from av import AudioResampler
 
     AIORTC_AVAILABLE = True
@@ -36,6 +38,8 @@ except Exception as exc:  # pragma: no cover - exercised via runtime fallback
     MediaStreamError = Exception  # type: ignore[assignment]
     candidate_from_sdp = None  # type: ignore[assignment]
     candidate_to_sdp = None  # type: ignore[assignment]
+    aioice_stun = None  # type: ignore[assignment]
+    aioice_turn = None  # type: ignore[assignment]
     AudioResampler = None  # type: ignore[assignment]
     AIORTC_AVAILABLE = False
     AIORTC_IMPORT_ERROR = exc
@@ -45,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 _AIOICE_HOST_ADDRESS_FILTER_INSTALLED = False
+_AIOICE_TURN_SENDTO_TASK_GUARD_INSTALLED = False
 
 
 def _install_aioice_host_address_filter() -> None:
@@ -84,6 +89,48 @@ def _install_aioice_host_address_filter() -> None:
 
     aioice_ice.get_host_addresses = _filtered_get_host_addresses
     _AIOICE_HOST_ADDRESS_FILTER_INSTALLED = True
+
+
+def _is_turn_channel_bind_forbidden_ip(exc: BaseException) -> bool:
+    """Return whether aioice reported a failed TURN CHANNEL_BIND for one candidate."""
+    if aioice_stun is None or not isinstance(exc, aioice_stun.TransactionFailed):
+        return False
+    response = getattr(exc, "response", None)
+    attributes = getattr(response, "attributes", {}) if response is not None else {}
+    error_code = attributes.get("ERROR-CODE") if isinstance(attributes, dict) else None
+    message_method = getattr(response, "message_method", None)
+    return (
+        isinstance(error_code, tuple)
+        and len(error_code) >= 1
+        and error_code[0] == 403
+        and message_method == aioice_stun.Method.CHANNEL_BIND
+    )
+
+
+def _install_aioice_turn_sendto_task_guard() -> None:
+    """Collect aioice TURN fire-and-forget task results so failed candidates stay non-fatal."""
+    global _AIOICE_TURN_SENDTO_TASK_GUARD_INSTALLED
+    if _AIOICE_TURN_SENDTO_TASK_GUARD_INSTALLED or not AIORTC_AVAILABLE or aioice_turn is None:
+        return
+
+    def _finalize_turn_send_data_task(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            if _is_turn_channel_bind_forbidden_ip(exc):
+                logger.info("Dropped failed TURN CHANNEL_BIND candidate: %s", exc)
+                return
+            logger.warning("TURN send_data task failed", exc_info=True)
+
+    def _guarded_sendto(self, data: bytes, addr: tuple[str, int]) -> None:
+        inner_protocol = getattr(self, "_TurnTransport__inner_protocol")
+        task = asyncio.create_task(inner_protocol.send_data(data, addr))
+        task.add_done_callback(_finalize_turn_send_data_task)
+
+    aioice_turn.TurnTransport.sendto = _guarded_sendto
+    _AIOICE_TURN_SENDTO_TASK_GUARD_INSTALLED = True
 
 
 class _QtRemoteAudioOutput(QObject):
@@ -652,6 +699,7 @@ class AiortcVoiceEngine(QObject):
             return
 
         _install_aioice_host_address_filter()
+        _install_aioice_turn_sendto_task_guard()
 
         config = None
         if self._ice_servers and RTCConfiguration is not None and RTCIceServer is not None:

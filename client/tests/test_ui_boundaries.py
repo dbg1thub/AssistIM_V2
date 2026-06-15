@@ -1514,6 +1514,35 @@ def test_aiortc_call_engine_task_failures_stay_inside_engine_boundary() -> None:
     assert 'if self._closing:' in finalize_method
 
 
+def test_aiortc_turn_channel_bind_403_is_collected_inside_aioice_boundary() -> None:
+    voice_engine = Path('client/call/aiortc_voice_engine.py').read_text(encoding='utf-8')
+    patch_method = voice_engine.split('def _install_aioice_turn_sendto_task_guard() -> None:', 1)[1].split(
+        'class _QtRemoteAudioOutput',
+        1,
+    )[0]
+    ensure_peer_connection_method = voice_engine.split('    async def _ensure_peer_connection(self) -> None:', 1)[1].split(
+        '        config = None',
+        1,
+    )[0]
+
+    assert 'import aioice.stun as aioice_stun' in voice_engine
+    assert 'import aioice.turn as aioice_turn' in voice_engine
+    assert '_AIOICE_TURN_SENDTO_TASK_GUARD_INSTALLED = False' in voice_engine
+    assert 'def _is_turn_channel_bind_forbidden_ip(exc: BaseException) -> bool:' in voice_engine
+    assert 'message_method = getattr(response, "message_method", None)' in voice_engine
+    assert 'message_method == aioice_stun.Method.CHANNEL_BIND' in voice_engine
+    assert 'error_code[0] == 403' in voice_engine
+    assert 'Forbidden IP' not in patch_method
+    assert 'def _guarded_sendto(self, data: bytes, addr: tuple[str, int]) -> None:' in patch_method
+    assert 'task = asyncio.create_task(inner_protocol.send_data(data, addr))' in patch_method
+    assert 'task.add_done_callback(_finalize_turn_send_data_task)' in patch_method
+    assert 'task.result()' in patch_method
+    assert 'Dropped failed TURN CHANNEL_BIND candidate' in patch_method
+    assert 'logger.warning("TURN send_data task failed"' in patch_method
+    assert 'aioice_turn.TurnTransport.sendto = _guarded_sendto' in patch_method
+    assert '_install_aioice_turn_sendto_task_guard()' in ensure_peer_connection_method
+
+
 def test_chat_interface_retains_closing_call_dialog_until_qt_destroyed() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     close_window_method = chat_interface.split('    def _close_call_window(self, call_id: str | None = None) -> None:', 1)[1].split(
