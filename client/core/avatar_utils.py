@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from client.core.config_backend import get_config
 
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 _DATA_ROOT = _WORKSPACE_ROOT / "data"
 _REMOTE_PREFIXES = ("http://", "https://")
+_SERVER_MEDIA_PREFIXES = ("/uploads/", "uploads/")
 
 
 def normalize_gender(value: object) -> str:
@@ -84,7 +88,40 @@ def resolve_avatar_source(
     if text.startswith(_REMOTE_PREFIXES):
         return text
 
+    remote_media = resolve_server_avatar_source(text)
+    if remote_media:
+        return remote_media
+
     return ""
+
+
+def resolve_server_avatar_source(value: object) -> str:
+    """Resolve one server-root avatar media path against the configured origin."""
+    text = str(value or "").strip()
+    if not text.startswith(_SERVER_MEDIA_PREFIXES):
+        return ""
+    normalized_path = text if text.startswith("/") else f"/{text}"
+    return f"{get_config().server.origin_url.rstrip('/')}{normalized_path}"
+
+
+def should_authenticate_avatar_source(source: object) -> bool:
+    """Return whether one avatar request targets protected same-origin media."""
+    source_text = str(source or "").strip()
+    if not source_text:
+        return False
+
+    split_result = urlsplit(source_text)
+    if not split_result.scheme and source_text.startswith(_SERVER_MEDIA_PREFIXES):
+        return True
+    if not split_result.scheme or not split_result.netloc:
+        return False
+
+    origin = urlsplit(get_config().server.origin_url)
+    return (
+        split_result.scheme == origin.scheme
+        and split_result.netloc == origin.netloc
+        and split_result.path.startswith("/uploads/")
+    )
 
 
 def choose_avatar_image(

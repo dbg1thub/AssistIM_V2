@@ -6087,6 +6087,36 @@ def test_resolve_avatar_source_keeps_remote_url() -> None:
     ) == remote_avatar
 
 
+def test_resolve_avatar_source_converts_server_media_to_origin_url(monkeypatch) -> None:
+    fake_config = types.SimpleNamespace(
+        server=types.SimpleNamespace(origin_url='http://app.local:8000')
+    )
+    monkeypatch.setattr(avatar_utils_module, 'get_config', lambda: fake_config)
+
+    assert avatar_utils_module.resolve_avatar_source(
+        '/uploads/generated_avatars/user-1.png',
+        gender='female',
+        seed='user-1',
+    ) == 'http://app.local:8000/uploads/generated_avatars/user-1.png'
+
+
+def test_avatar_media_authentication_only_targets_same_origin_uploads(monkeypatch) -> None:
+    fake_config = types.SimpleNamespace(
+        server=types.SimpleNamespace(origin_url='http://app.local:8000')
+    )
+    monkeypatch.setattr(avatar_utils_module, 'get_config', lambda: fake_config)
+
+    assert avatar_utils_module.should_authenticate_avatar_source(
+        'http://app.local:8000/uploads/generated_avatars/user-1.png'
+    ) is True
+    assert avatar_utils_module.should_authenticate_avatar_source(
+        'https://cdn.example.com/uploads/generated_avatars/user-1.png'
+    ) is False
+    assert avatar_utils_module.should_authenticate_avatar_source(
+        'D:/AssistIM_V2/data/uploads/generated_avatars/user-1.png'
+    ) is False
+
+
 def test_app_icon_paths_point_to_generated_svg_assets() -> None:
     add_path = Path(app_icons_module.AppIcon.ADD.path())
     people_path = Path(app_icons_module.AppIcon.PEOPLE.path())

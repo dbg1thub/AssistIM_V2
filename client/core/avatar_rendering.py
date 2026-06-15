@@ -11,8 +11,9 @@ from PySide6.QtCore import QObject, QRect, QSize, Signal, Qt, QUrl
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from client.core.avatar_utils import resolve_avatar_source
+from client.core.avatar_utils import resolve_avatar_source, should_authenticate_avatar_source
 from client.core.image_cache import get_image_cache
+from client.network.http_client import peek_http_client
 
 
 _REMOTE_PREFIXES = ("http://", "https://")
@@ -75,9 +76,18 @@ class AvatarImageStore(QObject):
             return
 
         self._pending_urls.add(url)
-        request = QNetworkRequest(QUrl(url))
+        request = self._build_remote_avatar_request(url)
         reply = self._network_manager.get(request)
         reply.finished.connect(lambda url=url, reply=reply: self._finalize_remote_download(url, reply))
+
+    @staticmethod
+    def _build_remote_avatar_request(url: str) -> QNetworkRequest:
+        request = QNetworkRequest(QUrl(url))
+        http_client = peek_http_client()
+        token = str(getattr(http_client, "access_token", "") or "").strip() if http_client is not None else ""
+        if token and should_authenticate_avatar_source(url):
+            request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))
+        return request
 
     def _finalize_remote_download(self, url: str, reply) -> None:
         self._pending_urls.discard(url)

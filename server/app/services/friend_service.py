@@ -58,18 +58,14 @@ class FriendService:
 
         incoming_pending = self._find_pending_request(pair_requests, receiver_id, current_user.id)
         if incoming_pending is not None:
-            accepted_request = self.friends.update_request_status(incoming_pending, "accepted", commit=False)
-            self.friends.create_friendship_pair(accepted_request.sender_id, accepted_request.receiver_id, commit=False)
-            self.db.commit()
-            self.db.refresh(accepted_request)
-            request_payload = self._serialize_request(accepted_request, users_by_id)
+            request_payload = self._serialize_request(incoming_pending, users_by_id)
             return self._serialize_relationship_mutation(
-                action="friendship_created",
-                changed=True,
+                action="request_reused",
+                changed=False,
                 created=False,
                 user=receiver,
                 friendship_user_id=receiver_id,
-                is_friend=True,
+                is_friend=False,
                 request=request_payload,
             )
 

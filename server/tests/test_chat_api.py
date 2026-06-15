@@ -241,7 +241,7 @@ def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
     assert send_json.await_count == 1
 
 
-def test_friend_request_create_echoes_reused_and_auto_accept_actions(
+def test_friend_request_create_reuses_pending_requests_without_auto_accepting(
     client: TestClient,
     user_factory,
     auth_header,
@@ -280,19 +280,21 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     )
     assert incoming_request.status_code == 200
 
-    auto_accept = client.post(
+    reverse_request = client.post(
         "/api/v1/friends/requests",
         json={"target_user_id": charlie["user"]["id"], "message": "accept by request"},
         headers=auth_header(alice["access_token"]),
     )
-    assert auto_accept.status_code == 200
-    auto_payload = auto_accept.json()["data"]
-    assert auto_payload["request"]["status"] == "accepted"
-    assert auto_payload["mutation"]["action"] == "friendship_created"
-    assert auto_payload["mutation"]["changed"] is True
-    assert auto_payload["relationship"]["friendship"] == {
-        "is_friend": True,
-        "friend_id": charlie["user"]["id"],
+    assert reverse_request.status_code == 200
+    reverse_payload = reverse_request.json()["data"]
+    assert reverse_payload["request"]["request_id"] == incoming_request.json()["data"]["request"]["request_id"]
+    assert reverse_payload["request"]["status"] == "pending"
+    assert reverse_payload["mutation"]["action"] == "request_reused"
+    assert reverse_payload["mutation"]["created"] is False
+    assert reverse_payload["mutation"]["changed"] is False
+    assert reverse_payload["relationship"]["friendship"] == {
+        "is_friend": False,
+        "friend_id": None,
         "remark": "",
     }
 
@@ -301,7 +303,21 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
         headers=auth_header(alice["access_token"]),
     )
     assert friendship_check.status_code == 200
-    assert friendship_check.json()["data"]["friendship"]["is_friend"] is True
+    assert friendship_check.json()["data"]["friendship"]["is_friend"] is False
+
+    accept_response = client.post(
+        f"/api/v1/friends/requests/{reverse_payload['request']['request_id']}/accept",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert accept_response.status_code == 200
+    assert accept_response.json()["data"]["request"]["status"] == "accepted"
+
+    accepted_friendship_check = client.get(
+        f"/api/v1/friends/check/{charlie['user']['id']}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert accepted_friendship_check.status_code == 200
+    assert accepted_friendship_check.json()["data"]["friendship"]["is_friend"] is True
 
 
 def test_friend_remark_is_owned_by_current_user_relationship(
