@@ -1473,6 +1473,65 @@ def test_call_dialog_style_is_opaque() -> None:
     assert 'animate_on_show=False' in call_window
 
 
+def test_aiortc_call_engine_close_waits_for_media_tasks_before_releasing_resources() -> None:
+    voice_engine = Path('client/call/aiortc_voice_engine.py').read_text(encoding='utf-8')
+    engine_class = voice_engine.split('class AiortcVoiceEngine(QObject):', 1)[1]
+    close_method = engine_class.split('    def close(self) -> None:', 1)[1].split(
+        '    def _finish_close_without_running_loop',
+        1,
+    )[0]
+    async_close_method = engine_class.split('    async def _close(self) -> None:', 1)[1].split(
+        '    def _release_media_resources',
+        1,
+    )[0]
+
+    assert 'self._closing = True' in close_method
+    assert 'self._release_media_resources()' not in close_method
+    assert 'await asyncio.gather(*pending_tasks, return_exceptions=True)' in async_close_method
+    assert async_close_method.index('await asyncio.gather(*pending_tasks, return_exceptions=True)') < async_close_method.index(
+        'self._release_media_resources()'
+    )
+    assert 'if self._closing:' in engine_class.split('    async def _render_local_video', 1)[1].split(
+        '    async def _render_remote_video',
+        1,
+    )[0]
+    assert 'if self._closing:' in engine_class.split('    async def _render_remote_video', 1)[1].split(
+        '    @staticmethod',
+        1,
+    )[0]
+
+
+def test_aiortc_call_engine_task_failures_stay_inside_engine_boundary() -> None:
+    voice_engine = Path('client/call/aiortc_voice_engine.py').read_text(encoding='utf-8')
+    finalize_method = voice_engine.split('    def _finalize_task(self, task: asyncio.Task, context: str) -> None:', 1)[1].split(
+        '    async def _start',
+        1,
+    )[0]
+
+    assert 'raise RuntimeError' not in finalize_method
+    assert 'logger.exception("Aiortc voice engine task failed' in finalize_method
+    assert 'self.error_reported.emit' in finalize_method
+    assert 'if self._closing:' in finalize_method
+
+
+def test_chat_interface_retains_closing_call_dialog_until_qt_destroyed() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    close_window_method = chat_interface.split('    def _close_call_window(self, call_id: str | None = None) -> None:', 1)[1].split(
+        '    def _end_local_call_ui',
+        1,
+    )[0]
+    destroyed_method = chat_interface.split('    def _on_call_window_destroyed(self, window: CallDialogType) -> None:', 1)[1].split(
+        '    def _on_call_window_hangup_requested',
+        1,
+    )[0]
+
+    assert 'self._closing_call_windows: set[CallDialogType] = set()' in chat_interface
+    assert 'self._closing_call_windows.add(window)' in close_window_method
+    assert 'window.end_call()' in close_window_method
+    assert close_window_method.index('self._closing_call_windows.add(window)') < close_window_method.index('window.end_call()')
+    assert 'self._closing_call_windows.discard(window)' in destroyed_method
+
+
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     typing_block = chat_interface.split('def _on_typing_event', 1)[1].split('def _on_read_event', 1)[0]

@@ -288,6 +288,7 @@ class AiortcVoiceEngine(QObject):
     camera_available_changed = Signal(bool)
     local_video_frame_changed = Signal(object)
     remote_video_frame_changed = Signal(object)
+    closed = Signal()
 
     def __init__(
         self,
@@ -336,6 +337,8 @@ class AiortcVoiceEngine(QObject):
         self._local_ice_sent_count = 0
         self._last_local_video_emit_at = 0.0
         self._last_remote_video_emit_at = 0.0
+        self._closing = False
+        self._closed = False
 
     def prepare(self, *, is_caller: bool) -> None:
         """Prewarm local media and optionally pre-create the caller offer."""
@@ -412,16 +415,26 @@ class AiortcVoiceEngine(QObject):
 
     def close(self) -> None:
         """Stop capture and close the peer connection."""
-        self._release_media_resources()
+        if self._closing or self._closed:
+            return
+        self._closing = True
         try:
             self._launch(self._close, "close aiortc voice engine")
         except RuntimeError:
-            self._signaling_ready = False
-            self._offer_sent = False
-            self._pending_signals.clear()
-            self._pending_remote_ice.clear()
-            self._remote_track_keys.clear()
-            self.state_changed.emit("Call ended")
+            self._finish_close_without_running_loop()
+
+    def _finish_close_without_running_loop(self) -> None:
+        """Complete close synchronously when no asyncio loop can drain media tasks."""
+        self._release_media_resources()
+        self._closed = True
+        self._closing = False
+        self._signaling_ready = False
+        self._offer_sent = False
+        self._pending_signals.clear()
+        self._pending_remote_ice.clear()
+        self._remote_track_keys.clear()
+        self.state_changed.emit("Call ended")
+        self.closed.emit()
 
     def _launch(self, coroutine_factory: Callable[[], Coroutine[Any, Any, Any]], context: str) -> None:
         """Start one tracked asyncio task."""
@@ -434,7 +447,7 @@ class AiortcVoiceEngine(QObject):
         task.add_done_callback(lambda finished, label=context: self._finalize_task(finished, label))
 
     def _finalize_task(self, task: asyncio.Task, context: str) -> None:
-        """Drop finished tasks and surface failures."""
+        """Drop finished tasks and surface failures within the engine boundary."""
         self._tasks.discard(task)
         try:
             task.result()
@@ -443,7 +456,12 @@ class AiortcVoiceEngine(QObject):
         except MediaStreamError:
             return
         except Exception as exc:  # pragma: no cover - runtime bridge
-            raise RuntimeError(str(exc) or f"Failed to {context}") from exc
+            logger.exception("Aiortc voice engine task failed: %s", context)
+            if self._closing:
+                return
+            self.error_reported.emit(str(exc) or f"Failed to {context}")
+            self.state_changed.emit("Connection failed")
+
 
     async def _start(self, *, is_caller: bool) -> None:
         """Initialize the peer connection and local audio capture."""
@@ -1167,10 +1185,12 @@ class AiortcVoiceEngine(QObject):
     async def _play_remote_audio(self, track) -> None:
         """Drain one inbound remote audio track into the Qt output device."""
         missing_output_reported = False
-        while True:
+        while not self._closing:
             try:
                 frame = await track.recv()
             except MediaStreamError:
+                break
+            if self._closing:
                 break
             if not self._remote_audio_output.is_available():
                 if not missing_output_reported:
@@ -1189,10 +1209,12 @@ class AiortcVoiceEngine(QObject):
     async def _render_local_video(self, track) -> None:
         """Read local preview frames and forward them to the Qt layer."""
         first_frame_logged = False
-        while True:
+        while not self._closing:
             try:
                 frame = await track.recv()
             except MediaStreamError:
+                break
+            if self._closing:
                 break
             if not self._camera_enabled:
                 continue
@@ -1209,10 +1231,12 @@ class AiortcVoiceEngine(QObject):
 
     async def _render_remote_video(self, track) -> None:
         """Read remote frames and forward them to the Qt layer."""
-        while True:
+        while not self._closing:
             try:
                 frame = await track.recv()
             except MediaStreamError:
+                break
+            if self._closing:
                 break
             image = self._frame_to_qimage(frame)
             if image is None:
@@ -1242,28 +1266,33 @@ class AiortcVoiceEngine(QObject):
 
     async def _close(self) -> None:
         """Release aiortc resources."""
-        current_task = asyncio.current_task()
-        pending_tasks: list[asyncio.Task] = []
-        for task in list(self._tasks):
-            if task is current_task:
-                continue
-            if not task.done():
-                task.cancel()
-                pending_tasks.append(task)
-        if pending_tasks:
-            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        try:
+            current_task = asyncio.current_task()
+            pending_tasks: list[asyncio.Task] = []
+            for task in list(self._tasks):
+                if task is current_task:
+                    continue
+                if not task.done():
+                    task.cancel()
+                    pending_tasks.append(task)
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-        if self._peer_connection is not None:
-            await self._peer_connection.close()
-            self._peer_connection = None
-        self._release_media_resources()
-        self._signaling_ready = False
-        self._offer_sent = False
-        self._pending_signals.clear()
-        self._pending_remote_ice.clear()
-        self._remote_track_keys.clear()
+            if self._peer_connection is not None:
+                await self._peer_connection.close()
+                self._peer_connection = None
+        finally:
+            self._release_media_resources()
+            self._closed = True
+            self._closing = False
+            self._signaling_ready = False
+            self._offer_sent = False
+            self._pending_signals.clear()
+            self._pending_remote_ice.clear()
+            self._remote_track_keys.clear()
 
-        self.state_changed.emit("Call ended")
+            self.state_changed.emit("Call ended")
+            self.closed.emit()
 
     def _release_media_resources(self) -> None:
         """Release local capture and playback resources immediately."""

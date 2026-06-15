@@ -625,6 +625,7 @@ class ChatInterface(QWidget):
         self._chat_search_dialog: ChatSessionSearchDialog | None = None
         self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
         self._call_window: CallDialogType | None = None
+        self._closing_call_windows: set[CallDialogType] = set()
         self._call_result_messages_sent: OrderedDict[str, float] = OrderedDict()
         self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
@@ -4314,6 +4315,7 @@ class ChatInterface(QWidget):
             return
         self._call_window = None
         self._stop_call_ring_sounds()
+        self._closing_call_windows.add(window)
         window.end_call()
 
     def _end_local_call_ui(self, call_id: str) -> None:
@@ -4324,6 +4326,7 @@ class ChatInterface(QWidget):
 
     def _on_call_window_destroyed(self, window: CallDialogType) -> None:
         """Clear the active call window reference once the widget is gone."""
+        self._closing_call_windows.discard(window)
         if self._call_window is window:
             self._call_window = None
 

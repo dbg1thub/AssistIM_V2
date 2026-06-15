@@ -146,6 +146,7 @@ class _CallDialogCore:
         )
         self._engine.signal_generated.connect(owner.signal_generated.emit)
         self._engine.state_changed.connect(self._on_engine_state_changed)
+        self._engine.closed.connect(self._on_engine_closed)
         self._engine.microphone_muted_changed.connect(self._on_microphone_muted_changed)
         self._engine.microphone_available_changed.connect(self._on_microphone_available_changed)
         self._engine.speaker_enabled_changed.connect(self._on_speaker_enabled_changed)
@@ -210,8 +211,8 @@ class _CallDialogCore:
     def end_call(self) -> None:
         self._closing_programmatically = True
         self._duration_timer.stop()
+        self._owner.hide()
         self._close_engine()
-        self._owner.close()
 
     def close_event(self) -> None:
         if not self._closing_programmatically:
@@ -250,6 +251,11 @@ class _CallDialogCore:
             return
         self._engine_closed = True
         self._engine.close()
+
+    def _on_engine_closed(self) -> None:
+        self._duration_timer.stop()
+        self._owner.close()
+        self._owner.deleteLater()
 
     def _on_microphone_muted_changed(self, muted: bool) -> None:
         mic_control = self._owner.mic_control
