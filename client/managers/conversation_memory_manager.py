@@ -172,8 +172,42 @@ class ConversationMemoryManager:
         "会话记录",
         "对话记录",
         "历史记录",
+        "历史消息",
+        "消息记录",
+        "聊天消息",
+        "本地记忆",
         "之前聊",
         "上次聊",
+    )
+    _RAG_DIRECT_MEMORY_INTENTS = (
+        "聊了什么",
+        "聊过什么",
+        "聊什么",
+        "聊啥",
+        "谈了什么",
+        "谈过什么",
+        "聊天记录",
+        "聊天摘要",
+        "聊天历史",
+        "说过什么",
+        "提到什么",
+    )
+    _RAG_RECALL_CUES = (
+        "上次",
+        "之前",
+        "以前",
+        "前面",
+        "那次",
+        "当时",
+        "刚才",
+        "提过",
+        "说过",
+        "发过",
+        "推荐过",
+        "分享过",
+        "聊过",
+        "谈过",
+        "告诉过",
     )
     _LOOKUP_ACTIONS = (
         "查",
@@ -310,6 +344,15 @@ class ConversationMemoryManager:
         debug["plan"] = raw_plan
         if plan is None or not plan.use_rag:
             return debug
+        if not self._rag_plan_is_in_ai_chat_memory_scope(
+            text,
+            plan,
+            previous_messages=previous_messages,
+        ):
+            debug["scope_rejected"] = True
+            debug["query_kind"] = str(plan.query_kind or "")
+            debug["rewritten_query"] = " ".join(str(plan.memory_query or plan.user_goal or text).split())
+            return debug
 
         query_base = " ".join(str(plan.memory_query or plan.user_goal or text).split())
         resolved, unresolved, ambiguous = await self._resolve_rag_participants(plan.participants)
@@ -409,6 +452,17 @@ class ConversationMemoryManager:
         raw_plan = await self._semantic_planner.plan(text, previous_messages=previous_messages)
         plan = self._normalize_rag_plan(raw_plan, fallback_query=text)
         if plan is None or not plan.use_rag:
+            return ConversationMemoryContext(lines=(), query_kind="")
+        if not self._rag_plan_is_in_ai_chat_memory_scope(
+            text,
+            plan,
+            previous_messages=previous_messages,
+        ):
+            logger.info(
+                "[ai-diag] ai_chat_rag_scope_rejected query_kind=%s participant_count=%s",
+                str(plan.query_kind or ""),
+                len(plan.participants),
+            )
             return ConversationMemoryContext(lines=(), query_kind="")
         if plan.participant_relation == "unknown":
             return ConversationMemoryContext(
@@ -1382,6 +1436,57 @@ class ConversationMemoryManager:
         if has_lookup_action and self._has_memory_reference(text) and (has_time or has_target):
             return True
         return False
+
+    def _rag_plan_is_in_ai_chat_memory_scope(
+        self,
+        query_text: str,
+        plan: ConversationRagSemanticPlan,
+        *,
+        previous_messages: Sequence[Any] | None,
+    ) -> bool:
+        candidate_texts = tuple(
+            text
+            for text in (
+                query_text,
+                plan.user_goal,
+                plan.memory_query,
+            )
+            if str(text or "").strip()
+        )
+        if any(self._text_has_explicit_ai_memory_scope(text) for text in candidate_texts):
+            return True
+        if any(self._text_has_recall_subject_scope(text) for text in candidate_texts):
+            return True
+
+        previous_user_text = self._latest_previous_user_text(previous_messages)
+        if not previous_user_text:
+            return False
+        if self._text_has_explicit_ai_memory_scope(previous_user_text):
+            return True
+        return self._text_has_recall_subject_scope(previous_user_text)
+
+    def _text_has_explicit_ai_memory_scope(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").casefold().split())
+        if not normalized:
+            return False
+        if self._has_memory_reference(normalized):
+            return True
+        return any(token in normalized for token in self._RAG_DIRECT_MEMORY_INTENTS)
+
+    def _text_has_recall_subject_scope(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").casefold().split())
+        if not normalized:
+            return False
+        if not any(token in normalized for token in self._RAG_RECALL_CUES):
+            return False
+        return bool(self._extract_terms(normalized))
+
+    def _latest_previous_user_text(self, previous_messages: Sequence[Any] | None) -> str:
+        for message in reversed(list(previous_messages or [])[-6:]):
+            if self._message_role(message) != "user":
+                continue
+            return " ".join(str(getattr(message, "content", "") or "").split())
+        return ""
 
     def _confirmed_pending_query_text(
         self,
