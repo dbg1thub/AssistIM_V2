@@ -2946,7 +2946,69 @@ def test_ai_action_registry_server_read_action_calls_client_and_normalizes_resul
         assert output["action"] == "user.search"
         assert output["items"] == [{"id": "user-1", "username": "test1"}]
         assert output["result_count"] == 1
-        assert output["text"] == "已完成用户搜索，返回 1 条结果。"
+        assert output["text"] == "找到 1 个用户：test1。"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_friend_check_uses_relationship_answer_text() -> None:
+    async def scenario() -> None:
+        reader = _FakeServerReadClient(
+            {
+                "friend.check": {
+                    "user": {"id": "user-2", "username": "test2", "nickname": "Test Two"},
+                    "friendship": {"is_friend": True, "friend_id": "user-2", "remark": "测试好友"},
+                }
+            }
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            server_reader=reader,
+        )
+        spec = registry.get("friend.check")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {"user_id": "user-2"},
+            {"step_id": "check_friendship"},
+        )
+
+        assert output["status"] == "ready"
+        assert output["action"] == "friend.check"
+        assert output["result_count"] == 1
+        assert output["text"] == "是，你和 测试好友 已经是好友。"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_friend_check_negative_uses_relationship_answer_text() -> None:
+    async def scenario() -> None:
+        reader = _FakeServerReadClient(
+            {
+                "friend.check": {
+                    "user": {"id": "user-2", "username": "test2", "nickname": ""},
+                    "friendship": {"is_friend": False, "friend_id": None, "remark": ""},
+                }
+            }
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            server_reader=reader,
+        )
+        spec = registry.get("friend.check")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {"user_id": "user-2"},
+            {"step_id": "check_friendship"},
+        )
+
+        assert output["status"] == "ready"
+        assert output["action"] == "friend.check"
+        assert output["result_count"] == 1
+        assert output["text"] == "不是，你和 test2 还不是好友。"
 
     asyncio.run(scenario())
 
@@ -6175,7 +6237,7 @@ def test_ai_action_executor_runs_server_read_action_without_confirmation(tmp_pat
             updated = await store.get_plan(record.id)
 
             assert result.state == "done"
-            assert result.response_text == "已完成用户搜索，返回 1 条结果。"
+            assert result.response_text == "找到 1 个用户：test1。"
             assert reader.calls == [{"action": "user.search", "args": {"keyword": "test1", "page": 1, "size": 10}}]
             assert updated is not None
             assert updated.state == "done"

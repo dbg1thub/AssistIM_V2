@@ -1250,7 +1250,7 @@ def _normalize_server_read_output(action_name: str, payload: Any) -> dict[str, A
     return {
         "action": action,
         "status": "ready",
-        "text": _server_read_text(action, result_count),
+        "text": _server_read_text(action, result_count, items=items, item=item),
         "result_count": result_count,
         "items": items,
         "item": item,
@@ -1287,9 +1287,117 @@ def _server_read_count(payload: dict[str, Any], *, fallback: int) -> int:
     return max(0, int(fallback or 0))
 
 
-def _server_read_text(action_name: str, result_count: int) -> str:
+def _server_read_text(
+    action_name: str,
+    result_count: int,
+    *,
+    items: Sequence[Any] | None = None,
+    item: dict[str, Any] | None = None,
+) -> str:
+    action = str(action_name or "").strip()
+    if action == "friend.check":
+        return _friend_check_text(dict(item or {}))
+    summary = _server_read_result_summary(action, result_count, list(items or []), dict(item or {}))
+    if summary:
+        return summary
     label = SERVER_READ_ACTION_LABELS.get(str(action_name or "").strip(), "服务端只读查询")
     return f"已完成{label}，返回 {max(0, int(result_count or 0))} 条结果。"
+
+
+def _friend_check_text(item: dict[str, Any]) -> str:
+    user = dict(item.get("user") or {}) if isinstance(item.get("user"), dict) else {}
+    friendship = dict(item.get("friendship") or {}) if isinstance(item.get("friendship"), dict) else {}
+    display_name = _display_name_for_payload({**user, "remark": friendship.get("remark")})
+    if not display_name:
+        display_name = "对方"
+    if bool(friendship.get("is_friend")):
+        return f"是，你和 {display_name} 已经是好友。"
+    return f"不是，你和 {display_name} 还不是好友。"
+
+
+def _server_read_result_summary(
+    action_name: str,
+    result_count: int,
+    items: list[Any],
+    item: dict[str, Any],
+) -> str:
+    action = str(action_name or "").strip()
+    if action in {"user.search", "friend.list", "friend.request.list", "group.list", "session.list", "message.list", "file.list", "moment.list"}:
+        return _server_read_list_summary(action, result_count, items)
+    if action in {"user.get", "group.get", "session.get", "moment.get"} and item:
+        name = _display_name_for_payload(item)
+        label = SERVER_READ_ACTION_LABELS.get(action, "查询")
+        return f"已找到{label}：{name}。" if name else f"已找到{label}。"
+    return ""
+
+
+def _server_read_list_summary(action_name: str, result_count: int, items: list[Any]) -> str:
+    count = max(0, int(result_count or 0))
+    noun = _server_read_list_noun(action_name)
+    if count <= 0:
+        return f"没有找到{noun}。"
+    names = [
+        _display_name_for_payload(item)
+        for item in items[:3]
+        if isinstance(item, dict) and _display_name_for_payload(item)
+    ]
+    suffix = f"：{'、'.join(names)}" if names else ""
+    more = "等" if count > len(names) and names else ""
+    return f"找到 {count} 个{noun}{suffix}{more}。"
+
+
+def _server_read_list_noun(action_name: str) -> str:
+    return {
+        "user.search": "用户",
+        "friend.list": "好友",
+        "friend.request.list": "好友申请",
+        "group.list": "群组",
+        "session.list": "会话",
+        "message.list": "消息",
+        "file.list": "文件",
+        "moment.list": "朋友圈动态",
+    }.get(str(action_name or "").strip(), "结果")
+
+
+def _display_name_for_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    user = dict(payload.get("user") or {}) if isinstance(payload.get("user"), dict) else {}
+    group = dict(payload.get("group") or {}) if isinstance(payload.get("group"), dict) else {}
+    session = dict(payload.get("session") or {}) if isinstance(payload.get("session"), dict) else {}
+    sender = dict(payload.get("sender") or {}) if isinstance(payload.get("sender"), dict) else {}
+    receiver = dict(payload.get("receiver") or {}) if isinstance(payload.get("receiver"), dict) else {}
+    candidate = {**payload, **session, **group, **receiver, **sender, **user}
+    for key in (
+        "remark",
+        "display_name",
+        "name",
+        "title",
+        "nickname",
+        "username",
+        "file_name",
+        "original_name",
+        "content",
+        "text",
+        "message",
+        "request_id",
+        "id",
+        "user_id",
+        "group_id",
+        "session_id",
+        "moment_id",
+    ):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            return _clip_display_text(value)
+    return ""
+
+
+def _clip_display_text(value: str, max_chars: int = 32) -> str:
+    text = " ".join(str(value or "").split())
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[: max(1, max_chars - 3)].rstrip() + "..."
 
 
 def _normalize_server_write_output(action_name: str, payload: Any) -> dict[str, Any]:
