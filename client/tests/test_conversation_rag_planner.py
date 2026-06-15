@@ -40,7 +40,7 @@ def test_conversation_rag_planner_coerces_string_true_to_memory() -> None:
     assert plan.use_rag is True
 
 
-def test_conversation_rag_planner_history_lines_ignore_assistant_and_current_query() -> None:
+def test_conversation_rag_planner_history_lines_keep_chat_roles_and_skip_current_query() -> None:
     planner = ConversationRagPlanner()
     previous_messages = [
         AIMessage("u1", "thread-1", AIMessageRole.USER, "帮我查张三昨天聊了什么"),
@@ -50,4 +50,7 @@ def test_conversation_rag_planner_history_lines_ignore_assistant_and_current_que
 
     lines = planner._history_lines(previous_messages=previous_messages, current_query="请你自我介绍下")
 
-    assert lines == ["user: 帮我查张三昨天聊了什么"]
+    assert lines == [
+        "user: 帮我查张三昨天聊了什么",
+        "assistant: 我先查一下本机聊天记录。",
+    ]

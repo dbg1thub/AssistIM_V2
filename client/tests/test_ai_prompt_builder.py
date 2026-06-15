@@ -109,8 +109,8 @@ def test_ai_chat_request_trims_long_assistant_history() -> None:
 
     assistant_context = [item["content"] for item in request.messages if item["role"] == "assistant"]
     assert len(assistant_context) == 1
-    assert assistant_context[0].startswith("[上一轮 AI 回复过长，已截取结尾]")
-    assert len(assistant_context[0]) <= builder.AI_CHAT_ASSISTANT_MESSAGE_CHARS
+    assert "[最近一轮 AI 回复过长，已保留开头和结尾]" in assistant_context[0]
+    assert len(assistant_context[0]) <= builder.AI_CHAT_RECENT_ASSISTANT_MESSAGE_CHARS
     assert request.metadata["prompt_chars"] <= builder.AI_CHAT_CONTEXT_CHARS
 
 

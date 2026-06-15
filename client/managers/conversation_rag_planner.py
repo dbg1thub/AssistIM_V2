@@ -64,8 +64,8 @@ class ConversationRagSemanticPlan:
 class ConversationRagPlanner:
     """Use the local model to decide whether one AI chat turn needs local retrieval."""
 
-    CONTEXT_MESSAGES = 4
-    MAX_CONTEXT_CHARS = 600
+    CONTEXT_MESSAGES = 6
+    MAX_CONTEXT_CHARS = 1200
 
     def __init__(self, task_manager: AITaskManager | None = None) -> None:
         self._task_manager = task_manager
@@ -94,7 +94,9 @@ class ConversationRagPlanner:
             "如果需要检索，输出一个结构化检索计划。\n"
             "不要规划执行动作，不要调用任何 action workflow。\n"
             "语义理解由你完成，系统只执行你给出的结构化检索信息。\n"
-            "最近对话只用于补全指代、省略和追问；如果当前问题本身是新的独立问题，必须以当前问题为准。"
+            "最近 AI 线程上下文只用于判断当前问题是否承接本页对话、补全指代、省略和追问；"
+            "它不是本机聊天记录检索材料。\n"
+            "如果当前问题可以基于最近 AI 线程上下文直接回答，不需要检索本机聊天历史。"
         )
         prompt = (
             f"当前本地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -118,14 +120,16 @@ class ConversationRagPlanner:
             "8. 只有参与人关系会显著改变查询结果且你无法判断时，participant_relation 才输出 unknown。\n"
             "9. 不要编造不存在的联系人或时间范围，不要输出多余字段。\n"
             "10. 如果当前问题可以直接回答，例如自我介绍、闲聊、翻译、写作、代码、常识问答，即使上一轮在查聊天记录，也必须 needs_memory=false。\n"
-            "11. 只有当前问题明确依赖本机聊天历史，或者当前句是承接上一轮历史问题的追问时，才 needs_memory=true。\n"
-            "12. 不要把上一轮 AI 自己说过的“聊天记录”“未找到”等话术当成当前用户意图。\n\n"
+            "11. 只有当前问题明确依赖 AssistIM 本机聊天历史、本地记忆、联系人或会话内容，"
+            "或者当前句承接最近用户提出的本机历史问题时，才 needs_memory=true。\n"
+            "12. 不要把最近上下文里的术语、助手说明或工具结果当成当前用户的检索意图。\n\n"
             "示例：\n"
             "- 当前问题：请你自我介绍下 -> needs_memory=false\n"
             "- 当前问题：帮我把这句话翻译成英文 -> needs_memory=false\n"
             "- 当前问题：张三昨天聊了什么 -> needs_memory=true\n"
             "- 最近用户问题：张三上次推荐的那家店是什么？ 当前问题：那家店在哪？ -> needs_memory=true，memory_query 应补全为张三上次推荐的那家店在哪\n\n"
-            f"最近用户消息（仅供补全指代；如果当前问题是新问题，应忽略这些历史）：\n{history_block}\n\n"
+            "最近 AI 线程上下文（标准 chat 角色；仅供理解当前问题是否承接本页对话）：\n"
+            f"{history_block}\n\n"
             f"当前用户问题：\n{query_text}"
         )
         request = AIRequest(
@@ -256,20 +260,31 @@ class ConversationRagPlanner:
         normalized_query = " ".join(str(current_query or "").split())
         for message in reversed(list(previous_messages or [])):
             role = self._message_role(message)
-            if role != "user":
+            if role not in {"user", "assistant"}:
                 continue
             content = " ".join(str(getattr(message, "content", "") or "").split())
-            if not content or content == normalized_query:
+            if not content:
                 continue
-            line = f"user: {content}"
-            if total_chars + len(line) > self.MAX_CONTEXT_CHARS and history_lines:
-                break
+            if role == "user" and content == normalized_query:
+                continue
+            line = f"{role}: {content}"
+            if total_chars + len(line) > self.MAX_CONTEXT_CHARS:
+                if history_lines:
+                    break
+                line = self._clip_history_line(line, self.MAX_CONTEXT_CHARS)
             history_lines.append(line)
             total_chars += len(line)
             if len(history_lines) >= self.CONTEXT_MESSAGES:
                 break
         history_lines.reverse()
         return history_lines
+
+    @staticmethod
+    def _clip_history_line(line: str, max_chars: int) -> str:
+        text = str(line or "").strip()
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        return text[: max(1, max_chars - 3)].rstrip() + "..."
 
     @staticmethod
     def _coerce_bool(value: Any) -> bool:

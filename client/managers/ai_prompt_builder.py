@@ -79,6 +79,8 @@ class AIPromptBuilder:
     AI_CHAT_CONTEXT_CHARS = 2400
     AI_CHAT_LATEST_USER_CHARS = 1800
     AI_CHAT_USER_MESSAGE_CHARS = 900
+    AI_CHAT_RECENT_ASSISTANT_MESSAGES = 2
+    AI_CHAT_RECENT_ASSISTANT_MESSAGE_CHARS = 1200
     AI_CHAT_ASSISTANT_MESSAGE_CHARS = 420
     AI_CHAT_MAX_TOKENS = 2048
     AI_CHAT_OUTPUT_CHARS = 0
@@ -221,6 +223,7 @@ class AIPromptBuilder:
         """Return recent user/assistant messages bounded by count and characters."""
         normalized: list[dict[str, str]] = []
         total_chars = 0
+        recent_assistant_count = 0
         for index, message in enumerate(reversed(list(messages or []))):
             role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
             if role not in {"user", "assistant"}:
@@ -231,22 +234,44 @@ class AIPromptBuilder:
             if not content:
                 continue
             if role == "assistant":
-                content = _clip_ai_chat_context_text(
-                    content,
-                    self.AI_CHAT_ASSISTANT_MESSAGE_CHARS,
-                    keep_tail=True,
-                    label="上一轮 AI 回复过长，已截取结尾",
-                )
+                is_recent_assistant = recent_assistant_count < self.AI_CHAT_RECENT_ASSISTANT_MESSAGES
+                if is_recent_assistant:
+                    content = _clip_ai_chat_context_text(
+                        content,
+                        self.AI_CHAT_RECENT_ASSISTANT_MESSAGE_CHARS,
+                        keep_edges=True,
+                        label="最近一轮 AI 回复过长，已保留开头和结尾",
+                    )
+                else:
+                    content = _clip_ai_chat_context_text(
+                        content,
+                        self.AI_CHAT_ASSISTANT_MESSAGE_CHARS,
+                        keep_tail=True,
+                        label="上一轮 AI 回复过长，已截取结尾",
+                    )
             elif index == 0:
                 content = _clip_ai_chat_context_text(content, self.AI_CHAT_LATEST_USER_CHARS)
             else:
                 content = _clip_ai_chat_context_text(content, self.AI_CHAT_USER_MESSAGE_CHARS)
             if len(normalized) >= self.AI_CHAT_CONTEXT_MESSAGES:
                 break
-            if total_chars + len(content) > self.AI_CHAT_CONTEXT_CHARS and normalized:
-                break
+            if total_chars + len(content) > self.AI_CHAT_CONTEXT_CHARS:
+                if normalized and role == "assistant" and is_recent_assistant:
+                    remaining = self.AI_CHAT_CONTEXT_CHARS - total_chars
+                    if remaining <= 0:
+                        break
+                    content = _clip_ai_chat_context_text(
+                        content,
+                        remaining,
+                        keep_edges=True,
+                        label="最近一轮 AI 回复过长，已按上下文预算保留开头和结尾",
+                    )
+                elif normalized:
+                    break
             normalized.append({"role": role, "content": content})
             total_chars += len(content)
+            if role == "assistant":
+                recent_assistant_count += 1
         normalized.reverse()
         while normalized and normalized[0]["role"] == "assistant":
             normalized.pop(0)
@@ -1102,12 +1127,24 @@ def _clip_ai_chat_context_text(
     max_chars: int,
     *,
     keep_tail: bool = False,
+    keep_edges: bool = False,
     label: str = "内容过长，已截断",
 ) -> str:
     text = re.sub(r"\s+", " ", str(value or "").strip())
     if max_chars <= 0 or len(text) <= max_chars:
         return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    if keep_edges:
+        marker = f" ... [{label}] ... "
+        budget = max_chars - len(marker)
+        if budget > 8:
+            head_budget = max(1, budget // 2)
+            tail_budget = max(1, budget - head_budget)
+            return f"{text[:head_budget].rstrip()}{marker}{text[-tail_budget:].lstrip()}"
     marker = f"[{label}] "
+    if max_chars <= len(marker) + 3:
+        return f"{text[: max(1, max_chars - 3)].rstrip()}..."
     budget = max(1, max_chars - len(marker) - 3)
     if keep_tail:
         return f"{marker}...{text[-budget:].lstrip()}"
