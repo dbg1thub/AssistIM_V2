@@ -57,6 +57,8 @@ MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS = 260
 MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
 MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v3"
 MEMORY_SUMMARIZE_MODEL_ID = "ai_action_memory_summarizer:v1"
+MEMORY_SEARCH_TIMEOUT_MS = 60_000
+MEMORY_SUMMARIZE_TIMEOUT_MS = 120_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,6 +593,7 @@ class AtomicActionRegistry:
                 result_limit_arg_names=("limit", "max_items"),
                 default_result_limit=8,
                 max_result_items=50,
+                timeout_ms=MEMORY_SEARCH_TIMEOUT_MS,
                 prompt_purpose="检索本地聊天记忆、摘要和可用消息索引。",
                 prompt_notes=(
                     "用于用户询问历史、回顾、总结或查找已存在内容。",
@@ -616,6 +619,7 @@ class AtomicActionRegistry:
                 model_call_cost=1,
                 estimated_input_tokens=2048,
                 estimated_output_tokens=512,
+                timeout_ms=MEMORY_SUMMARIZE_TIMEOUT_MS,
                 prompt_purpose="把 memory.search 的结构化结果压缩为面向用户问题的回答摘要。",
                 planner_required_predecessors=("memory.search",),
                 prompt_notes=(

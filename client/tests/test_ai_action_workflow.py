@@ -3321,11 +3321,18 @@ def test_ai_action_registry_default_specs_declare_platform_boundaries() -> None:
         if spec.kind == "read":
             assert spec.allow_side_effect is False
 
+    search = registry.get("memory.search")
+    assert search is not None
+    assert search.timeout_ms == registry_module.MEMORY_SEARCH_TIMEOUT_MS
+    assert search.timeout_ms > AtomicActionSpec(name="default", kind="read", risk_level="low").timeout_ms
+
     summarize = registry.get("memory.summarize")
     assert summarize is not None
     assert summarize.model_call_cost == 1
     assert summarize.estimated_input_tokens > 0
     assert summarize.estimated_output_tokens > 0
+    assert summarize.timeout_ms == registry_module.MEMORY_SUMMARIZE_TIMEOUT_MS
+    assert summarize.timeout_ms > AtomicActionSpec(name="default", kind="read", risk_level="low").timeout_ms
 
     send = registry.get("message.send")
     assert send is not None
