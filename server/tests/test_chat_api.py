@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +42,13 @@ def issue_profile_email_code(client: TestClient, email: str) -> str:
     code = str(response.json()["data"].get("debug_code") or "").strip()
     assert code, response.text
     return code
+
+
+def assert_utc_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    return parsed
 
 
 def test_friend_request_private_session_and_message_flow(
@@ -151,9 +158,9 @@ def test_friend_request_private_session_and_message_flow(
     assert "id" not in message_payload
     assert "msg_id" not in message_payload
     assert "type" not in message_payload
-    assert datetime.fromisoformat(message_payload["created_at"])
+    assert_utc_iso(message_payload["created_at"])
     assert "timestamp" not in message_payload
-    assert datetime.fromisoformat(message_payload["updated_at"])
+    assert_utc_iso(message_payload["updated_at"])
     assert message_payload["session_type"] == "direct"
     assert sorted(message_payload["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
     assert "session_name" not in message_payload
@@ -175,7 +182,7 @@ def test_friend_request_private_session_and_message_flow(
     assert "id" not in history_payload["messages"][0]
     assert "msg_id" not in history_payload["messages"][0]
     assert "type" not in history_payload["messages"][0]
-    assert datetime.fromisoformat(history_payload["messages"][0]["created_at"])
+    assert_utc_iso(history_payload["messages"][0]["created_at"])
     assert "timestamp" not in history_payload["messages"][0]
     assert history_payload["messages"][0]["created_at"] == message_payload["created_at"]
     assert "session_type" not in history_payload["messages"][0]
@@ -188,7 +195,7 @@ def test_friend_request_private_session_and_message_flow(
     )
     assert sessions_response.status_code == 200
     session_payload = sessions_response.json()["data"]
-    assert datetime.fromisoformat(session_payload[0]["last_message_time"])
+    assert_utc_iso(session_payload[0]["last_message_time"])
     assert session_payload[0]["last_message_time"] == message_payload["created_at"]
 
 

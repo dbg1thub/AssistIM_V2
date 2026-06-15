@@ -18,11 +18,9 @@ def ensure_utc(value: datetime) -> datetime:
 
 
 def isoformat_utc(value: datetime | None) -> str | None:
-    """Serialize one datetime while preserving naive wall-clock values."""
+    """Serialize one datetime as an explicit UTC ISO timestamp."""
     if value is None:
         return None
-    if value.tzinfo is None:
-        return value.isoformat()
     return ensure_utc(value).isoformat()
 
 
